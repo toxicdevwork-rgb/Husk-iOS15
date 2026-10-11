@@ -1,0 +1,59 @@
+name: Compare published Husk packages
+on:
+  workflow_dispatch:
+  push:
+    paths: [.github/workflows/compare-packages.yml]
+permissions:
+  actions: read
+  contents: read
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 38165267807
+          pattern: Husk-iOS15-build-*
+          path: previous
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 38170540191
+          pattern: Husk-iOS15-build-*
+          path: current
+      - name: Compare exact package and runtime bytes
+        shell: python
+        run: |
+          import pathlib, hashlib, zipfile, os, plistlib
+          sha=lambda b: hashlib.sha256(b).hexdigest()
+          results={}
+          lines=['# Published TIPA comparison', '']
+          for label in ('previous','current'):
+              p=next(pathlib.Path(label).rglob('*.tipa'))
+              data=p.read_bytes()
+              lines += [f'## {label}',f'Package: {p.name}',f'Bytes: {len(data)}',f'MB: {len(data)/1000000:.6f}',f'MiB: {len(data)/1048576:.6f}',f'SHA256: {sha(data)}','']
+              with zipfile.ZipFile(p) as z:
+                  names=z.namelist()
+                  root=next(n for n in names if n.endswith('.app/Info.plist')).removesuffix('Info.plist')
+                  info=plistlib.loads(z.read(root+'Info.plist'))
+                  members=[info['CFBundleExecutable'],'java-runtime/husk-framework.dex','ru.lproj/Localizable.strings']
+                  results[label]={}
+                  for name in members:
+                      b=z.read(root+name)
+                      results[label][name]=sha(b)
+                      lines += [f'{name}: {len(b)} bytes; SHA256 {sha(b)}']
+                  dex=z.read(root+'java-runtime/husk-framework.dex')
+                  lines += [f'New bmReconfigure DEX symbol present: {b"bmReconfigure" in dex}']
+                  if label=='current':
+                      assert b'bmReconfigure' in dex, 'Missing new bitmap fix in packaged DEX'
+              lines += ['']
+          lines += ['## Changed runtime files']
+          for name,value in results['current'].items():
+              changed=value!=results['previous'][name]
+              lines += [f'{name}: changed={changed}']
+              assert changed, f'Unexpected unchanged runtime file: {name}'
+          report='\n\n'.join(lines)
+          print(report)
+          pathlib.Path(os.environ['GITHUB_STEP_SUMMARY']).write_text(report)

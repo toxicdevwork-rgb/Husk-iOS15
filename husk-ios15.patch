@@ -5969,7 +5969,7 @@ index 97bc417..d3c924d 100644
 -        CODE_SIGN_STYLE: Automatic
 -        TARGETED_DEVICE_FAMILY: "1"
 diff --git a/src/java-framework/build.sh b/src/java-framework/build.sh
-index df636d6..b136190 100755
+index df636d6..ec44b41 100755
 --- a/src/java-framework/build.sh
 +++ b/src/java-framework/build.sh
 @@ -2,16 +2,20 @@
@@ -5990,7 +5990,7 @@ index df636d6..b136190 100755
      grep -v "^Note:" "$TMP/javac.log" > "${JAVAC_LOG:-/dev/stderr}"; echo "javac failed" >&2; exit 1
  fi
 +# Exercise Java API contracts used by Fresco before producing the device dex.
-+"$JDK/bin/javac" --release 8 -encoding UTF-8 -cp "$TMP/classes" -d "$TMP/tests" "$HERE/../../tests/java/husk/Gfx.java" "$HERE/../../tests/java/ImageCompatibilityTest.java"
++"$JDK/bin/javac" --release 8 -encoding UTF-8 -cp "$TMP/classes" -d "$TMP/tests" "$HERE/../../tests/java/husk/Gfx.java" "$HERE/../../tests/java/husk/Native.java" "$HERE/../../tests/java/ImageCompatibilityTest.java"
 +"$JDK/bin/java" -cp "$TMP/tests:$TMP/classes" ImageCompatibilityTest
  (cd "$TMP/classes" && "$JDK/bin/jar" cf "$TMP/classes.jar" .)
  "$JDK/bin/java" -cp "$D8" com.android.tools.r8.D8 --min-api 26 --output "$TMP" "$TMP/classes.jar"
@@ -6204,6 +6204,14 @@ index 0000000..4f70fd9
 +    public static long bmDecode(byte[] data,int off,int len,int sample,int[] wh,boolean bounds) { wh[0]=16; wh[1]=8; return bounds?0:bmNew(16,8); }
 +    public static int live() { return allocations.size(); }
 +}
+diff --git a/tests/java/husk/Native.java b/tests/java/husk/Native.java
+new file mode 100644
+index 0000000..b57a038
+--- /dev/null
++++ b/tests/java/husk/Native.java
+@@ -0,0 +1,2 @@
++package husk;
++public final class Native { public static float density() { return 1.0f; } }
 diff --git a/tests/test_ios15_bundle.py b/tests/test_ios15_bundle.py
 new file mode 100644
 index 0000000..20d4f74

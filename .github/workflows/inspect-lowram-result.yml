@@ -1,6 +1,11 @@
 name: Inspect low-RAM Android result
 on:
   workflow_dispatch:
+    inputs:
+      run_id:
+        description: Android experiment run ID
+        required: true
+        default: '38174295002'
   push:
     paths: [.github/workflows/inspect-lowram-result.yml]
   workflow_run:
@@ -16,7 +21,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ github.event.workflow_run.id || '38169714066' }}
+          run-id: ${{ github.event.workflow_run.id || inputs.run_id || '38174295002' }}
           pattern: Android-1GiB-experiment-*
           path: evidence
           merge-multiple: true

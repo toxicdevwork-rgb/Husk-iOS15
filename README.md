@@ -1,15 +1,26 @@
 # Husk
 
-**Experimental iOS 15.6 backport.** This branch adapts upstream commit
-`6b59e21dbe6ac7013f237c149f995c231a05900b` for iPhone 12 mini / iOS 15.6.1.
-IPA and TIPA were built with Xcode 26.6 in
-[GitHub Actions](https://github.com/toxicdevwork-rgb/Husk-iOS15/actions/runs/38151341187).
-[Download the build artifact](https://github.com/toxicdevwork-rgb/Husk-iOS15/actions/runs/38151341187/artifacts/11706817512).
-All five bundled Mach-O files passed arm64/iOS <= 15.6.1 metadata checks.
-Installation, JIT and games still require testing on the device.
-The published fork stores changes in `husk-ios15.patch`; CI applies that patch
-to the pinned upstream commit before compiling. The source files shown in the
-fork are the upstream baseline, not the patched build checkout.
+**Experimental iOS 15.6 backport with Russian UI.** Targets iPhone 12 mini,
+iOS 15.6.1 and Dopamine/TrollStore, based on upstream `6b59e21dbe6ac7013f237c149f995c231a05900b`.
+
+[Build 8 — successful GitHub Actions build](https://github.com/toxicdevwork-rgb/Husk-iOS15/actions/runs/38165267807)
+· [Download IPA / TIPA](https://github.com/toxicdevwork-rgb/Husk-iOS15/actions/runs/38165267807/artifacts/11712386304).
+For TrollStore, use `Husk-iOS15.tipa` from the artifact ZIP.
+
+This update includes the previously missing Java/Android runtime resources,
+358 Russian interface entries with an English switch, shared-JIT ownership checks,
+and Android boot diagnostics. The build validates both binary compatibility and
+runtime resources before packaging. An additional workflow inspects the published archives.
+
+The previous build opened on the device and passed the JIT self-test, but Discord
+failed on missing Java resources and Android did not complete booting. **Discord
+compatibility and Android boot after these fixes still require device testing.**
+Disable Android autostart and restart Husk before testing Translation Layer.
+For Android on the 12 mini, select CPU rendering and leave at least 3 GB free for
+the RAM file. Switching runtimes requires restarting Husk because they share JIT memory.
+
+The fork stores changes in `husk-ios15.patch`; CI applies it to the pinned upstream
+commit. The source tree shown on GitHub is the upstream baseline.
 See [port status and build instructions](docs/07-ios15-port.md).
 Built-in StikJIT and Live Activities are omitted from this distribution.
 

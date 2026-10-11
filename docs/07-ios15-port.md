@@ -129,3 +129,31 @@ Mach-O. SwiftUI и ARM64-код здесь не выполнялись.
 импорт APK, экспорт отчёта, поворот игры, JIT self-test с фактическим исполнением кода,
 запуск одного ARM64 GLES-приложения, Vulkan-приложения и отдельно QEMU-гостя.
 Записать логи JIT, dyld, Metal и jetsam. До этого совместимость не подтверждена.
+
+
+## Discord image compatibility follow-up
+
+The device report reached the Android compatibility runtime and failed in
+Fresco ImageRequestBuilder while creating a chat view. Husk's Uri.Builder
+produced opaque `res:123` instead of hierarchical `res:/123`, so getPath()
+returned null. The builder now inserts the required slash for a scheme.
+
+BitmapFactory ignored inBitmap and Bitmap.reconfigure did nothing. The decoder
+now returns the supplied mutable bitmap, keeps its allocation capacity stable,
+updates its dimensions, copies decoded pixels, and releases temporary storage.
+This addresses Fresco's identity checks and pool-accounting failures. Regression
+tests run on the CI host; the native implementation is compiled for iOS.
+Rendering and chat interactions still require a device retest.
+
+The translation runtime has a separate long-session limitation: Runtime.nativeGc
+is a no-op and tl_jni_unref intentionally retains objects while the DVM is active.
+Changing guest VM RAM does not implement Java garbage collection. Do not describe
+this build as memory-bounded or fully compatible with Discord.
+
+The wrapper repository also has a separate 1024 MiB guest experiment. It enables
+Android's low-RAM configuration, reduces ART heaps, preserves the core services
+and Husk shell bridge, and checks a real cold boot before exporting the image.
+It does not replace the app's guest automatically or claim that all of Husk fits
+in 1 GiB. The iOS process also needs QEMU, translated code and rendering memory.
+
+Reference contracts: [AOSP Uri.Builder](https://android.googlesource.com/platform/frameworks/base/+/a69950c/core/java/android/net/Uri.java) and [Fresco image decoder](https://github.com/facebook/fresco/tree/main/imagepipeline/src/main/java/com/facebook/imagepipeline/platform).

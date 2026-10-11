@@ -1,0 +1,29 @@
+name: Inspect low-RAM Android result
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: [Test Android with 1 GiB guest RAM]
+    types: [completed]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id || '38169714066' }}
+          pattern: Android-1GiB-experiment-*
+          path: evidence
+          merge-multiple: true
+      - name: Show guest diagnostics and boot gate result
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          for p in sorted(Path('evidence').rglob('*')):
+              if p.is_file() and p.suffix in ('.txt', '.json', '.log'):
+                  print('FILE', p.name)
+                  print(p.read_text(errors='replace')[-18000:])
+          PY

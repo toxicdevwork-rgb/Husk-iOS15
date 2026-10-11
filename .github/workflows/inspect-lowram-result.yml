@@ -24,12 +24,17 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import os
+          import os, re
           summary=[]
           for p in sorted(Path('evidence').rglob('*')):
               if p.is_file() and p.suffix in ('.txt', '.json', '.log'):
                   print('FILE', p.name)
-                  content=p.read_text(errors='replace')[-18000:]
+                  full=p.read_text(errors='replace')
+                  if p.name == 'serial.log':
+                      key=re.compile(r'out of memory|lowmemorykiller|lmkd|watchdog|boot_completed|husk_agent|fatal|zygote.*(?:exited|signal)|system_server.*(?:exited|signal)', re.I)
+                      selected='\n'.join(line for line in full.splitlines() if key.search(line))[-18000:]
+                      summary.append('### Boot and failure signals\n\n```text\n'+selected.replace('```','~~~')+'\n```\n')
+                  content=full[-18000:]
                   print(content)
                   summary.append('### '+p.name+'\n\n```text\n'+content.replace('```','~~~')+'\n```\n')
           assert summary, 'No evidence files were downloaded'

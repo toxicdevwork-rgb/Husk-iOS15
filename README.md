@@ -17,10 +17,12 @@ retest for chats and rendering. **Long-running Java translation can exhaust memo
 the upstream DVM has no tracing garbage collector.** Reducing VM RAM does not fix it.
 Disable Android autostart and restart Husk before testing Translation Layer.
 
-A separate CI experiment builds a low-RAM Android guest and tests a cold boot at
-1024 MiB. It has not been approved as the app's default guest. The original Android
-profile still requires storage for its RAM file; total Husk memory also includes
-QEMU, JIT and rendering. Switching runtimes requires restarting Husk.
+The 1024 MiB Android experiment reached `sys.boot_completed=1` after about
+582 seconds and reported 201 MiB available guest memory. It did **not** pass the
+backend stability checks; later tests rebooted through RescueParty. The low-RAM
+image is **not shipped in Build 11**. [Experiment evidence](https://github.com/toxicdevwork-rgb/Husk-iOS15/actions/runs/38173342589).
+The original Android profile still requires storage for its RAM file. Total Husk
+memory also includes QEMU, JIT and rendering; switching runtimes requires restarting Husk.
 
 The fork stores changes in `husk-ios15.patch`; CI applies it to the pinned upstream
 commit. The source tree shown on GitHub is the upstream baseline.

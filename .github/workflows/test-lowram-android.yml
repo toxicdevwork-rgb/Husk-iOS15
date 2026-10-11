@@ -1,0 +1,39 @@
+name: Test Android with 1 GiB guest RAM
+on:
+  workflow_dispatch:
+  push:
+    paths: [.github/workflows/test-lowram-android.yml]
+permissions:
+  contents: read
+jobs:
+  boot:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare pinned guest tooling
+        run: |
+          git clone --no-checkout --filter=blob:none https://github.com/Leviidev/Husk.git husk
+          git -C husk checkout 6b59e21dbe6ac7013f237c149f995c231a05900b
+          git -C husk apply ../husk-ios15.patch
+          sudo apt-get update -qq
+          sudo apt-get install -y qemu-system-arm qemu-utils qemu-efi-aarch64 e2fsprogs
+      - name: Build low-RAM image and test actual Android boot and services
+        run: python3 -u lowram_guest.py
+      - name: Preserve experiment evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Android-1GiB-experiment-${{ github.run_number }}
+          path: |
+            lowram-work/result.json
+            lowram-work/serial.log
+            lowram-work/qemu.log
+            lowram-work/backend-check.txt
+      - name: Preserve image only after passing boot gate
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Android-1GiB-tested-image
+          compression-level: 0
+          path: lowram-work/vda-lowram.qcow2

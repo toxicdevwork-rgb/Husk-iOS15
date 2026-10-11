@@ -87,10 +87,10 @@ index 66c6d9b..8d3b8e2 100644
  
 diff --git a/docs/07-ios15-port.md b/docs/07-ios15-port.md
 new file mode 100644
-index 0000000..ce4e8e4
+index 0000000..e0b419b
 --- /dev/null
 +++ b/docs/07-ios15-port.md
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,123 @@
 +# Порт Husk на iOS 15.6.1: состояние
 +
 +Цель: iPhone 12 mini, A14, iOS 15.6.1, Dopamine/TrollStore.
@@ -178,9 +178,29 @@ index 0000000..ce4e8e4
 +Подпись ad hoc и различие IPA/TIPA
 +унаследованы от upstream; entitlements не удалялись только из-за возраста iOS.
 +
-+`ci_build.sh` upstream не создаёт опциональные ресурсы `android-system` и `java-runtime`:
-+для приложений, которым нужны эти ресурсы, требуются соответствующие build-скрипты.
-+Это ограничение не устранено данным портом.
++`ci_build.sh` теперь собирает обязательные `android-system` и `java-runtime` из
++закреплённого образа Lineage v12. SHA-256 проверяется до извлечения. JDK 17 и R8 8.5.35
++создают `husk-framework.dex` из исходников. Проверка пакета отклоняет отсутствующие JAR,
++JAR без `classes.dex`, библиотеки неверной архитектуры и отсутствующие шрифты/сертификаты.
++
++Отдельная сборка интерфейса без этих ресурсов не считается полной IPA.
++
++### Исправления после проверки на iPhone 12 mini
++
++- Русский интерфейс по умолчанию; переключатель RU/EN в настройках (с перезапуском).
++- QEMU и трансляция не запускаются в одном процессе одновременно: они использовали одну
++  заранее выделенную область JIT. Для смены режима требуется полностью перезапустить Husk.
++- Программная графика Android по умолчанию. GPU остаётся экспериментальной настройкой.
++- На устройствах с 4 ГБ RAM и меньше используется кандидат 2 ГБ для файла памяти вместо
++  попыток выделить 4–5 ГБ; до запуска проверяется свободное место (нужно минимум 3 ГБ).
++- При учёте памяти резервируется фактический размер JIT 512 МБ. Ошибки выделения
++  запоминаются отдельно для файловой и анонимной памяти.
++- Экран загрузки показывает реальные этапы и прошедшее время, позволяет открыть/отправить
++  журналы; без новых этапов появляется диагностическое сообщение.
++
++Работа Discord и полная загрузка Android после этих изменений требуют повторной проверки
++на устройстве. Устранение отсутствующих ресурсов само по себе не доказывает совместимость
++всех Android API или библиотек React Native. Журналы пользователя в репозиторий не включены.
 +
 +## Что проверено и что осталось
 +
@@ -285,7 +305,7 @@ index 0000000..42f842e
 +    raise SystemExit(bool(problems))
 diff --git a/scripts/audit_runtime_resources.py b/scripts/audit_runtime_resources.py
 new file mode 100644
-index 0000000..88c7fd7
+index 0000000..4df299b
 --- /dev/null
 +++ b/scripts/audit_runtime_resources.py
 @@ -0,0 +1,58 @@
@@ -335,7 +355,7 @@ index 0000000..88c7fd7
 +    except (OSError, KeyError, ValueError, zipfile.BadZipFile) as e:
 +        errors.append(str(e))
 +    for folder, pattern in [('java-runtime/com.android.i18n/etc/icu', '*.dat'),
-+                            ('java-runtime/com.android.tzdata/etc', 'tzdata'),
++                            ('java-runtime/com.android.tzdata/etc/tz', 'tzdata'),
 +                            ('android-system/fonts', '*.ttf'), ('android-system/cacerts', '*'),
 +                            ('android-system/etc', 'fonts.xml')]:
 +        if not any(p.is_file() and p.stat().st_size > 0 for p in (root/folder).glob(pattern)):
@@ -650,7 +670,7 @@ index 2ec1376..3408b18 100755
  EMBEDDED_ENTS=$(codesign -d --entitlements - "$SAPP" 2>&1 || true)
 diff --git a/scripts/prepare_android_runtime.py b/scripts/prepare_android_runtime.py
 new file mode 100644
-index 0000000..33ab468
+index 0000000..6697c60
 --- /dev/null
 +++ b/scripts/prepare_android_runtime.py
 @@ -0,0 +1,178 @@
@@ -758,10 +778,10 @@ index 0000000..33ab468
 +
 +    def dump(image, path, dest, directory=False):
 +        # debugfs may exit 0 on a missing file: validate the actual output.
-+        subprocess.run([debugfs, '-R', f'{"rdump" if directory else "dump"} {path} {dest}', str(image)], check=True)
++        result_log = subprocess.run([debugfs, '-R', f'{"rdump" if directory else "dump"} {path} {dest}', str(image)], check=True, capture_output=True, text=True)
 +        result = dest / Path(path).name if directory else dest
 +        if not result.exists() or (result.is_file() and result.stat().st_size == 0):
-+            raise ValueError(f'Missing required Android resource: {path}')
++            raise ValueError(f'Missing required Android resource: {path}\n{result_log.stderr}')
 +        return result
 +
 +    if not stamp.exists() or stamp.read_text().strip() != IMAGE_SHA:
@@ -1030,13 +1050,43 @@ index 49f8c12..59140a7 100644
              .accessibilityLabel("\(app.label), minimised")
              .accessibilityHint("Shows the window again")
 diff --git a/src/app/Husk/BootScreen.swift b/src/app/Husk/BootScreen.swift
-index 8a0bd2e..d70a3d7 100644
+index 8a0bd2e..0dacb6a 100644
 --- a/src/app/Husk/BootScreen.swift
 +++ b/src/app/Husk/BootScreen.swift
-@@ -28,20 +28,9 @@ struct BootScreen: View {
-     /// Said in order, not at random: the first two land while someone is still
-     /// looking at the screen, and the jokes should not repeat before the
-     /// information does.
+@@ -1,47 +1,23 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ import SwiftUI
+ 
+-/// The screen Husk opens on when it is starting Android for you.
+-///
+-/// Before this, "start on launch" dropped you into a library whose apps could
+-/// not be opened yet, with a strip at the top explaining why — which is a UI
+-/// asking you to wait in front of it. A boot is a boot: it gets its own screen,
+-/// it says how far along it is, and it talks to you while it works. The phrases
+-/// are there because two minutes of a progress bar is two minutes of wondering
+-/// whether it has hung.
++/// Android boot milestones and direct access to the three diagnostic logs.
++/// Elapsed time is shown independently; no timer invents boot progress.
+ struct BootScreen: View {
+     let onSkip: () -> Void
+ 
+     @ObservedObject private var runner = QemuRunner.shared
+-    @ObservedObject private var host = AndroidHost.shared
+ 
+-    @State private var phrase = 0
+     @State private var began = Date()
+     @State private var now = Date()
+     @State private var pulse = false
+-    /// When bootProgress last moved, so the bar can creep between milestones.
++    /// Time of the last confirmed Android boot milestone.
+     @State private var lastStep = Date()
+ 
+     private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+-    private let rotate = Timer.publish(every: 3.4, on: .main, in: .common).autoconnect()
+-
+-    /// Said in order, not at random: the first two land while someone is still
+-    /// looking at the screen, and the jokes should not repeat before the
+-    /// information does.
 -    private static let phrases = [
 -        "Prepare for awesomeness",
 -        "Waking Android up",
@@ -1051,27 +1101,31 @@ index 8a0bd2e..d70a3d7 100644
 -        "Negotiating with the JIT",
 -        "Nearly there",
 -    ]
-+    private static let phrases = [L("First boot can take 5–15 minutes. Progress is reported by Android.")]
++
 +    @State private var showLogs = false
 +
  
      var body: some View {
          ZStack {
-@@ -66,11 +55,11 @@ struct BootScreen: View {
+@@ -64,15 +40,12 @@ struct BootScreen: View {
+                     .padding(.leading, 9)
+                     .padding(.top, 18)
  
-                 // The line that talks. Keyed on the index so each one fades
-                 // into the next rather than snapping.
+-                // The line that talks. Keyed on the index so each one fades
+-                // into the next rather than snapping.
 -                Text(Self.phrases[phrase % Self.phrases.count])
-+                Text(now.timeIntervalSince(lastStep) > 90 ? L("No new boot milestone. Open the logs to see whether Android is making progress.") : Self.phrases[0])
++                Text(now.timeIntervalSince(lastStep) > 90 ? L("No new boot milestone. Open the logs to see whether Android is making progress.") : L("First boot can take 5–15 minutes. Progress is reported by Android."))
                      .font(.system(size: 15))
                      .foregroundStyle(Theme.textDim)
                      .multilineTextAlignment(.center)
 -                    .frame(height: 42)
 +                    .frame(minHeight: 60)
                      .padding(.horizontal, 30)
-                     .id(phrase)
+-                    .id(phrase)
                      .transition(.opacity)
-@@ -84,16 +73,21 @@ struct BootScreen: View {
+                     .padding(.top, 10)
+ 
+@@ -84,16 +57,21 @@ struct BootScreen: View {
  
                  // What Android itself is doing, small, under everything else.
                  // The phrases pass the time; this is the part that is true.
@@ -1095,15 +1149,20 @@ index 8a0bd2e..d70a3d7 100644
                          .font(.system(size: 13, weight: .medium))
                          .foregroundStyle(Theme.textDim)
                          .padding(.top, 14)
-@@ -102,6 +96,7 @@ struct BootScreen: View {
+@@ -102,11 +80,9 @@ struct BootScreen: View {
              }
              .padding(.bottom, 26)
          }
 +        .sheet(isPresented: $showLogs) { LogView() }
          .onReceive(tick) { now = $0 }
          .onChange(of: runner.bootProgress) { _ in lastStep = Date() }
-         .onReceive(rotate) { _ in
-@@ -117,7 +112,7 @@ struct BootScreen: View {
+-        .onReceive(rotate) { _ in
+-            withAnimation(.easeInOut(duration: 0.45)) { phrase += 1 }
+-        }
+         .animation(.easeInOut(duration: 0.3), value: now.timeIntervalSince(began) > 8)
+     }
+ 
+@@ -117,13 +93,13 @@ struct BootScreen: View {
                      Capsule().fill(Theme.surfaceHigh)
                      Capsule().fill(Theme.accent)
                          .frame(width: geo.size.width * fraction)
@@ -1112,10 +1171,21 @@ index 8a0bd2e..d70a3d7 100644
                  }
              }
              .frame(height: 5)
-@@ -146,37 +141,10 @@ struct BootScreen: View {
-     /// and late in a cold boot those are minutes apart. In between, the bar gains 1%
-     /// every 30 seconds. It stops one short of the next milestone and never passes 95%,
-     /// so it can never claim more progress than the guest has made.
+ 
+             HStack {
+-                Text(shown > 0 ? "\(shown)%" : "starting")
++                Text(shown > 0 ? "\(shown)%" : L("starting"))
+                     .font(.technical(12, weight: .medium))
+                     .foregroundStyle(Theme.accent)
+                 Spacer()
+@@ -142,41 +118,6 @@ struct BootScreen: View {
+         max(CGFloat(shown) / 100, 0.03)
+     }
+ 
+-    /// Progress as shown. The real number only moves when a milestone line appears,
+-    /// and late in a cold boot those are minutes apart. In between, the bar gains 1%
+-    /// every 30 seconds. It stops one short of the next milestone and never passes 95%,
+-    /// so it can never claim more progress than the guest has made.
 -    private var shown: Int {
 -        let real = runner.bootProgress
 -        guard real > 0, real < 100, !QemuRunner.didRestore else { return real }
@@ -1123,11 +1193,10 @@ index 8a0bd2e..d70a3d7 100644
 -        let creep = Int(now.timeIntervalSince(lastStep) / 30)
 -        return max(real, min(real + creep, next - 1, 95))
 -    }
-+    private var shown: Int { runner.bootProgress }
- 
-     /// An estimate from this boot's own pace, not from a number someone typed
-     /// in. Withheld until there is enough of a curve to divide by, and dropped
-     /// again near the end, where being wrong is most annoying.
+-
+-    /// An estimate from this boot's own pace, not from a number someone typed
+-    /// in. Withheld until there is enough of a curve to divide by, and dropped
+-    /// again near the end, where being wrong is most annoying.
 -    private var remaining: String? {
 -        let done = Double(runner.bootProgress)
 -        // Past zygote the remaining time is mostly app compilation, and the early
@@ -1150,7 +1219,8 @@ index 8a0bd2e..d70a3d7 100644
 -        }
 -        return "about \(Int((left / 60).rounded())) minutes remaining"
 -    }
-+    private var remaining: String? { nil } // Do not invent a completion estimate.
++    private var shown: Int { runner.bootProgress }
++    private var remaining: String? { nil }
  }
 diff --git a/src/app/Husk/ContentView.swift b/src/app/Husk/ContentView.swift
 index e95d66d..6d8e946 100644
@@ -2434,7 +2504,7 @@ index 058281d..b3f1099 100644
      @MainActor static func open() {
          let installed = isInstalled
 diff --git a/src/app/Husk/JITSetupView.swift b/src/app/Husk/JITSetupView.swift
-index 053c8af..515bb18 100644
+index 053c8af..43a9422 100644
 --- a/src/app/Husk/JITSetupView.swift
 +++ b/src/app/Husk/JITSetupView.swift
 @@ -1,5 +1,6 @@
@@ -2456,7 +2526,7 @@ index 053c8af..515bb18 100644
                      switch step {
                      case .pairOnDevice: pairOnDevice
                      case .importFile: importFile
-@@ -64,9 +65,9 @@ struct JITSetupFlow: View {
+@@ -64,45 +65,46 @@ struct JITSetupFlow: View {
      // MARK: Choose
  
      private var choose: some View {
@@ -2468,16 +2538,19 @@ index 053c8af..515bb18 100644
 +                     + L("On iOS 15, use TrollStore or Dopamine with Allow JIT in Apps enabled.")) {
              VStack(spacing: 10) {
                  let builtIn = HuskBuiltInJIT.unavailableReason
-                 way("Pair on this \(device)", symbol: "iphone.radiowaves.left.and.right",
-@@ -75,20 +76,21 @@ struct JITSetupFlow: View {
+-                way("Pair on this \(device)", symbol: "iphone.radiowaves.left.and.right",
++                way(L("Pair on this device"), symbol: "iphone.radiowaves.left.and.right",
+                     detail: builtIn ?? (!OnDevicePairing.isSupported ? "Needs iOS 27 or later."
+                         : jit.pairingSource == .onDevice ? "Paired on this \(device)."
                          : "No computer needed. Pairs from Settings in a minute."),
                      done: jit.pairingSource == .onDevice,
                      enabled: builtIn == nil && OnDevicePairing.isSupported) { path.append(.pairOnDevice) }
 -                way("Use a pairing file", symbol: "doc.badge.plus",
 -                    detail: builtIn ?? (jit.pairingSource == .imported ? "Pairing file imported."
+-                        : "Import a pairing file made on a computer."),
 +                way(L("Use a pairing file"), symbol: "doc.badge.plus",
 +                    detail: builtIn ?? (jit.pairingSource == .imported ? L("Pairing file imported.")
-                         : "Import a pairing file made on a computer."),
++                        : L("Import a pairing file made on a computer.")),
                      done: jit.pairingSource == .imported,
                      enabled: builtIn == nil) { path.append(.importFile) }
 -                way("Use StikDebug", symbol: "ant",
@@ -2486,6 +2559,7 @@ index 053c8af..515bb18 100644
 -                    done: jit.method == .stikDebug) { path.append(.stikDebug) }
 -                way("Use TrollStore", symbol: "sparkles",
 -                    detail: JITBootstrap.isTrollStoreInstalled ? "TrollStore is installed."
+-                        : "For a Husk installed through TrollStore.",
 +                way(L("Use StikDebug"), symbol: "ant",
 +                    detail: L("StikDebug requires iOS 17.4 or later."),
 +                    done: jit.method == .stikDebug,
@@ -2493,14 +2567,17 @@ index 053c8af..515bb18 100644
 +                        OperatingSystemVersion(majorVersion: 17, minorVersion: 4, patchVersion: 0))) { path.append(.stikDebug) }
 +                way(L("Use TrollStore"), symbol: "sparkles",
 +                    detail: JITBootstrap.isTrollStoreInstalled ? L("TrollStore is installed.")
-                         : "For a Husk installed through TrollStore.",
++                        : L("For a Husk installed through TrollStore."),
                      done: jit.method == .trollStore) { path.append(.trollStore) }
 -                way("Use a jailbreak", symbol: "lock.open",
+-                    detail: JITBootstrap.debuggedAtLaunch ? "JIT was already on when Husk opened."
+-                        : JITBootstrap.isJailbroken ? "A jailbreak was found. Turn on Allow JIT in Apps."
+-                        : "Dopamine can give every app JIT with one setting.",
 +                way(L("Use a jailbreak"), symbol: "lock.open",
-                     detail: JITBootstrap.debuggedAtLaunch ? "JIT was already on when Husk opened."
-                         : JITBootstrap.isJailbroken ? "A jailbreak was found. Turn on Allow JIT in Apps."
-                         : "Dopamine can give every app JIT with one setting.",
-@@ -96,13 +98,13 @@ struct JITSetupFlow: View {
++                    detail: JITBootstrap.debuggedAtLaunch ? L("JIT was already on when Husk opened.")
++                        : JITBootstrap.isJailbroken ? L("A jailbreak was found. Turn on Allow JIT in Apps.")
++                        : L("Dopamine can give every app JIT with one setting."),
+                     done: jit.method == .jailbreak || JITBootstrap.debuggedAtLaunch) { path.append(.jailbreak) }
              }
              if jit.hasPairing && HuskBuiltInJIT.isAvailable {
                  Button { path.append(.connect) } label: {
@@ -2516,6 +2593,15 @@ index 053c8af..515bb18 100644
                  .font(.system(size: 15, weight: .medium))
                  .foregroundStyle(Theme.textDim)
          }
+@@ -145,7 +147,7 @@ struct JITSetupFlow: View {
+     }
+ 
+     private var pairOnDevice: some View {
+-        page(symbol: "iphone.radiowaves.left.and.right", title: "Pair on this \(device)",
++        page(symbol: "iphone.radiowaves.left.and.right", title: L("Pair on this device"),
+              subtitle: "Husk pretends to be a computer on your Wi-Fi, and your \(device) pairs with it "
+                      + "the way it would with a Mac.") {
+             VStack(alignment: .leading, spacing: 14) {
 @@ -165,15 +167,15 @@ struct JITSetupFlow: View {
              switch pairing.phase {
              case .idle, .failed:
@@ -2535,7 +2621,7 @@ index 053c8af..515bb18 100644
                      .buttonStyle(PrimaryButtonStyle())
              }
          }
-@@ -190,7 +192,7 @@ struct JITSetupFlow: View {
+@@ -190,13 +192,12 @@ struct JITSetupFlow: View {
                      Text("Waiting for your \(device)…").font(.system(size: 15, weight: .semibold))
                          .foregroundStyle(Theme.text)
                  }
@@ -2544,7 +2630,14 @@ index 053c8af..515bb18 100644
                      if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
                  }
                  .font(.system(size: 14, weight: .semibold))
-@@ -224,7 +226,7 @@ struct JITSetupFlow: View {
+                 if pairing.backgroundLimited {
+-                    Text("This installation can only wait about 30 seconds in the background, "
+-                       + "so go to Settings straight away.")
++                    Text(L("This installation can only wait about 30 seconds in the background, so go to Settings straight away."))
+                         .font(.system(size: 13)).foregroundStyle(.orange)
+                         .fixedSize(horizontal: false, vertical: true)
+                 }
+@@ -224,7 +225,7 @@ struct JITSetupFlow: View {
      // MARK: Import a pairing file
  
      private var importFile: some View {
@@ -2553,7 +2646,7 @@ index 053c8af..515bb18 100644
               subtitle: "A pairing file made on a computer lets Husk talk to this \(device) the same way.") {
              VStack(alignment: .leading, spacing: 14) {
                  point(1, "On a computer, make this \(device)'s pairing file with the "
-@@ -241,11 +243,11 @@ struct JITSetupFlow: View {
+@@ -241,11 +242,11 @@ struct JITSetupFlow: View {
              if let error = jit.error { outcome(error, ok: false) }
          } actions: {
              if jit.pairingSource == .imported {
@@ -2568,7 +2661,7 @@ index 053c8af..515bb18 100644
                      .buttonStyle(PrimaryButtonStyle())
              }
          }
-@@ -254,7 +256,7 @@ struct JITSetupFlow: View {
+@@ -254,7 +255,7 @@ struct JITSetupFlow: View {
      // MARK: LocalDevVPN
  
      private var connect: some View {
@@ -2577,7 +2670,7 @@ index 053c8af..515bb18 100644
               subtitle: "Husk's helper reaches this \(device)'s debugging service through a local VPN. "
                       + "Nothing leaves your \(device).") {
              VStack(alignment: .leading, spacing: 14) {
-@@ -267,7 +269,7 @@ struct JITSetupFlow: View {
+@@ -267,7 +268,7 @@ struct JITSetupFlow: View {
          } actions: {
              Button(LocalDevVPN.actionTitle) { LocalDevVPN.open() }
                  .buttonStyle(PrimaryButtonStyle())
@@ -2586,7 +2679,7 @@ index 053c8af..515bb18 100644
                  .font(.system(size: 15, weight: .medium))
          }
      }
-@@ -277,7 +279,7 @@ struct JITSetupFlow: View {
+@@ -277,7 +278,7 @@ struct JITSetupFlow: View {
      private var attached: Bool { jit.attachGeneration > 0 || JITBootstrap.debuggedFlag }
  
      private var enable: some View {
@@ -2595,7 +2688,7 @@ index 053c8af..515bb18 100644
               subtitle: "The first check downloads and mounts Apple's Developer Disk Image, "
                       + "which can take a minute.") {
              VStack(alignment: .leading, spacing: 14) {
-@@ -290,7 +292,7 @@ struct JITSetupFlow: View {
+@@ -290,7 +291,7 @@ struct JITSetupFlow: View {
              if jit.busy {
                  HStack(spacing: 11) {
                      ProgressView().tint(Theme.accent)
@@ -2604,7 +2697,7 @@ index 053c8af..515bb18 100644
                      Spacer(minLength: 0)
                  }
                  .padding(16).huskCard(high: true)
-@@ -300,7 +302,7 @@ struct JITSetupFlow: View {
+@@ -300,7 +301,7 @@ struct JITSetupFlow: View {
                  VStack(alignment: .leading, spacing: 10) {
                      outcome(error, ok: false)
                      if jit.connectionProblem == .pairing {
@@ -2613,7 +2706,7 @@ index 053c8af..515bb18 100644
                              path = [OnDevicePairing.isSupported ? .pairOnDevice : .importFile]
                          }
                          .font(.system(size: 14, weight: .semibold))
-@@ -315,20 +317,20 @@ struct JITSetupFlow: View {
+@@ -315,20 +316,20 @@ struct JITSetupFlow: View {
              }
  
              if !attached {
@@ -2638,7 +2731,7 @@ index 053c8af..515bb18 100644
                      .buttonStyle(PrimaryButtonStyle(enabled: !jit.busy))
                      .disabled(jit.busy)
              }
-@@ -338,7 +340,7 @@ struct JITSetupFlow: View {
+@@ -338,7 +339,7 @@ struct JITSetupFlow: View {
      // MARK: StikDebug
  
      private var stikDebug: some View {
@@ -2647,7 +2740,7 @@ index 053c8af..515bb18 100644
               subtitle: "StikDebug is a separate app that attaches to Husk. Husk sends it the JIT script "
                       + "itself, so nothing needs configuring for Husk inside StikDebug.") {
              VStack(alignment: .leading, spacing: 14) {
-@@ -350,7 +352,7 @@ struct JITSetupFlow: View {
+@@ -350,7 +351,7 @@ struct JITSetupFlow: View {
              }
              .padding(16).huskCard()
          } actions: {
@@ -2656,16 +2749,30 @@ index 053c8af..515bb18 100644
                  jit.method = .stikDebug
                  HuskLog.log("ui", "JIT method set to StikDebug")
                  close()
-@@ -362,7 +364,7 @@ struct JITSetupFlow: View {
+@@ -362,17 +363,14 @@ struct JITSetupFlow: View {
      // MARK: TrollStore
  
      private var trollStore: some View {
 -        page(symbol: "sparkles", title: "Use TrollStore",
+-             subtitle: "TrollStore can enable JIT for apps it installed, with no pairing file, "
+-                     + "VPN or computer.") {
 +        page(symbol: "sparkles", title: L("Use TrollStore"),
-              subtitle: "TrollStore can enable JIT for apps it installed, with no pairing file, "
-                      + "VPN or computer.") {
++             subtitle: L("TrollStore can enable JIT for apps it installed, with no pairing file, VPN or computer.")) {
              VStack(alignment: .leading, spacing: 14) {
-@@ -382,7 +384,7 @@ struct JITSetupFlow: View {
+-                point(1, "Install Husk.ipa through TrollStore, on an iOS version TrollStore supports. It carries the "
+-                       + "entitlements TrollStore keeps, so the same file works there and in a sideloader.",
++                point(1, L("Install Husk.ipa through TrollStore, on an iOS version TrollStore supports. It carries the entitlements TrollStore keeps, so the same file works there and in a sideloader."),
+                       done: JITBootstrap.isInstalledWithTrollStore)
+-                point(2, "In TrollStore's Settings, turn on URL Scheme. TrollStore ignores enable-jit requests without it.",
++                point(2, L("In TrollStore's Settings, turn on URL Scheme. TrollStore ignores enable-jit requests without it."),
+                       done: JITBootstrap.isTrollStoreInstalled)
+-                point(3, "Whenever Android or a game starts, Husk asks TrollStore to enable JIT. TrollStore opens Husk, "
+-                       + "attaches to it for a moment and lets go, which leaves it allowed to run code it wrote.")
++                point(3, L("Whenever Android or a game starts, Husk asks TrollStore to enable JIT. TrollStore opens Husk, attaches to it for a moment and lets go, which leaves it allowed to run code it wrote."))
+             }
+             .padding(16).huskCard()
+             if !JITBootstrap.isTrollStoreInstalled {
+@@ -382,7 +380,7 @@ struct JITSetupFlow: View {
                      .fixedSize(horizontal: false, vertical: true)
              }
          } actions: {
@@ -2674,16 +2781,23 @@ index 053c8af..515bb18 100644
                  jit.method = .trollStore
                  HuskLog.log("ui", "JIT method set to TrollStore")
                  close()
-@@ -394,7 +396,7 @@ struct JITSetupFlow: View {
+@@ -394,25 +392,24 @@ struct JITSetupFlow: View {
      // MARK: Jailbreak
  
      private var jailbreak: some View {
 -        page(symbol: "lock.open", title: "Use a jailbreak",
+-             subtitle: "On a device jailbroken with Dopamine, JIT is a setting: the jailbreak marks every app as "
+-                     + "debugged when it opens, and a debugged app may run code it wrote. Husk needs nothing else.") {
 +        page(symbol: "lock.open", title: L("Use a jailbreak"),
-              subtitle: "On a device jailbroken with Dopamine, JIT is a setting: the jailbreak marks every app as "
-                      + "debugged when it opens, and a debugged app may run code it wrote. Husk needs nothing else.") {
++             subtitle: L("On a device jailbroken with Dopamine, JIT is a setting: the jailbreak marks every app as debugged when it opens, and a debugged app may run code it wrote. Husk needs nothing else.")) {
              VStack(alignment: .leading, spacing: 14) {
-@@ -405,14 +407,14 @@ struct JITSetupFlow: View {
+-                point(1, "Open Dopamine and go to its Settings.", done: JITBootstrap.isJailbroken)
+-                point(2, "Turn on Allow JIT in Apps.")
+-                point(3, "Close Husk completely and open it again. The setting applies to apps as they start.",
++                point(1, L("Open Dopamine and go to its Settings."), done: JITBootstrap.isJailbroken)
++                point(2, L("Turn on Allow JIT in Apps."))
++                point(3, L("Close Husk completely and open it again. The setting applies to apps as they start."),
+                       done: JITBootstrap.debuggedAtLaunch)
              }
              .padding(16).huskCard()
              if JITBootstrap.debuggedAtLaunch {
@@ -2700,7 +2814,7 @@ index 053c8af..515bb18 100644
                  jit.method = .jailbreak
                  HuskLog.log("ui", "JIT method set to jailbreak")
                  close()
-@@ -452,7 +454,7 @@ struct JITSetupFlow: View {
+@@ -452,7 +449,7 @@ struct JITSetupFlow: View {
          .navigationBarTitleDisplayMode(.inline)
          .toolbar {
              ToolbarItem(placement: .confirmationAction) {
@@ -2710,7 +2824,7 @@ index 053c8af..515bb18 100644
          }
      }
 diff --git a/src/app/Husk/Launcher.swift b/src/app/Husk/Launcher.swift
-index e800074..ce25435 100644
+index e800074..867ed11 100644
 --- a/src/app/Husk/Launcher.swift
 +++ b/src/app/Husk/Launcher.swift
 @@ -1,5 +1,6 @@
@@ -2870,16 +2984,18 @@ index e800074..ce25435 100644
                          .font(.subheadline.weight(.bold))
                          .foregroundStyle(.primary)
                          .padding(.horizontal, 14)
-@@ -430,7 +431,7 @@ private struct WelcomeCard: View {
+@@ -430,16 +431,15 @@ private struct WelcomeCard: View {
                  .frame(width: 60, height: 60)
                  .background(Color.accentColor.opacity(0.15), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
              VStack(alignment: .leading, spacing: 6) {
 -                Text("Add your first game")
 +                Text(L("Add your first game"))
                      .font(.system(.title2, design: .rounded).weight(.bold))
-                 Text("Pick an APK or a bundle (.xapk, .apkm, .apks), or share one to Husk from Files or Safari. Games run "
-                    + "straight on your iPhone. Other apps run inside Android.")
-@@ -439,7 +440,7 @@ private struct WelcomeCard: View {
+-                Text("Pick an APK or a bundle (.xapk, .apkm, .apks), or share one to Husk from Files or Safari. Games run "
+-                   + "straight on your iPhone. Other apps run inside Android.")
++                Text(L("Pick an APK or a bundle (.xapk, .apkm, .apks), or share one to Husk from Files or Safari. Games run straight on your iPhone. Other apps run inside Android."))
+                     .font(.subheadline)
+                     .foregroundStyle(.secondary)
                      .fixedSize(horizontal: false, vertical: true)
              }
              Button { router.addSomething() } label: {
@@ -2888,7 +3004,7 @@ index e800074..ce25435 100644
              }
              .buttonStyle(PrimaryButtonStyle())
          }
-@@ -456,7 +457,7 @@ private struct ShelfHeader: View {
+@@ -456,7 +456,7 @@ private struct ShelfHeader: View {
          HStack(alignment: .firstTextBaseline) {
              Text(title).font(.system(.title3, design: .rounded).weight(.bold))
              Spacer()
@@ -2897,7 +3013,7 @@ index e800074..ce25435 100644
          }
          .padding(.bottom, -10)
      }
-@@ -535,7 +536,7 @@ struct AndroidMark: View {
+@@ -535,7 +535,7 @@ struct AndroidMark: View {
              .font(.system(size: size * 0.46, weight: .semibold))
              .foregroundStyle(.white)
              .frame(width: size, height: size)
@@ -2906,7 +3022,7 @@ index e800074..ce25435 100644
      }
  }
  
-@@ -562,20 +563,20 @@ struct LibraryScreen: View {
+@@ -562,20 +562,20 @@ struct LibraryScreen: View {
      @State private var query = ""
  
      var body: some View {
@@ -2931,7 +3047,7 @@ index e800074..ce25435 100644
                          ForEach(LibraryFilter.allCases) { Text($0.title).tag($0) }
                      }
                      .pickerStyle(.segmented)
-@@ -590,10 +591,10 @@ struct LibraryScreen: View {
+@@ -590,10 +590,10 @@ struct LibraryScreen: View {
                      let apps = (matches(query, "Android") ? [LibraryItem.android] : []) + items.filter { !$0.isGame }
  
                      if router.libraryFilter != .apps {
@@ -2944,7 +3060,7 @@ index e800074..ce25435 100644
                      }
                      if !query.isEmpty, games.isEmpty, apps.isEmpty { NoResults(query: query) }
                  }
-@@ -601,10 +602,10 @@ struct LibraryScreen: View {
+@@ -601,10 +601,10 @@ struct LibraryScreen: View {
                  .padding(.top, 8)
                  .padding(.bottom, 32)
              }
@@ -2958,7 +3074,7 @@ index e800074..ce25435 100644
              .libraryDestinations()
          }
      }
-@@ -625,7 +626,7 @@ struct LibraryScreen: View {
+@@ -625,7 +625,7 @@ struct LibraryScreen: View {
                                                   count: UIDevice.current.userInterfaceIdiom == .pad ? 8 : 4),
                                    spacing: 18) {
                              ForEach(items) { item in
@@ -2967,7 +3083,7 @@ index e800074..ce25435 100644
                                      LauncherTile(title: item.title, iconPath: item.iconPath, item: item, caption: caption(item), size: 60)
                                  }
                                  .buttonStyle(CardButtonStyle())
-@@ -643,7 +644,7 @@ struct LibraryScreen: View {
+@@ -643,7 +643,7 @@ struct LibraryScreen: View {
              if g.packageName == GeodeSupport.launcherPackage { return "Geode" }
              return g.report?.canRun == true ? nil : "May not run"
          case .android:
@@ -2976,7 +3092,7 @@ index e800074..ce25435 100644
              return guest.state == .ready ? nil : "Not installed"
          case .app: return nil
          }
-@@ -744,21 +745,21 @@ struct SearchField: View {
+@@ -744,21 +744,21 @@ struct SearchField: View {
                  TextField(prompt, text: $text)
                      .focused($focused)
                      .submitLabel(.search)
@@ -3001,7 +3117,7 @@ index e800074..ce25435 100644
                      .transition(.move(edge: .trailing).combined(with: .opacity))
              }
          }
-@@ -772,7 +773,7 @@ struct NoResults: View {
+@@ -772,7 +772,7 @@ struct NoResults: View {
      var body: some View {
          VStack(spacing: 8) {
              Image(systemName: "magnifyingglass").font(.system(size: 28, weight: .light)).foregroundStyle(.secondary)
@@ -3010,7 +3126,7 @@ index e800074..ce25435 100644
              Text("Nothing here is called “\(query)”.").font(.subheadline).foregroundStyle(.secondary)
          }
          .frame(maxWidth: .infinity)
-@@ -789,8 +790,8 @@ func matches(_ query: String, _ names: String...) -> Bool {
+@@ -789,8 +789,8 @@ func matches(_ query: String, _ names: String...) -> Bool {
  extension View {
      /// The pages an item opens, for whichever stack shows it.
      func libraryDestinations() -> some View {
@@ -3021,7 +3137,7 @@ index e800074..ce25435 100644
          }
      }
  }
-@@ -817,6 +818,6 @@ private struct LibraryRouteView: View {
+@@ -817,6 +817,6 @@ private struct LibraryRouteView: View {
  
  private struct GoneView: View {
      var body: some View {
@@ -3047,7 +3163,7 @@ index 0000000..0f9e434
 +    return bundle.localizedString(forKey: key, value: key, table: nil)
 +}
 diff --git a/src/app/Husk/OnboardingView.swift b/src/app/Husk/OnboardingView.swift
-index b1e4d9f..f5dfe26 100644
+index b1e4d9f..2ca042f 100644
 --- a/src/app/Husk/OnboardingView.swift
 +++ b/src/app/Husk/OnboardingView.swift
 @@ -65,18 +65,18 @@ struct OnboardingView: View {
@@ -3072,16 +3188,20 @@ index b1e4d9f..f5dfe26 100644
                      }
                      .buttonStyle(PrimaryButtonStyle())
                      .padding(.horizontal, 28)
-@@ -110,7 +110,7 @@ struct OnboardingView: View {
+@@ -110,10 +110,9 @@ struct OnboardingView: View {
                      .shadow(color: Theme.accent.opacity(0.35), radius: 22, y: 10)
              }
              Text("Husk").font(.system(size: 40, weight: .semibold, design: .rounded))
 -            Text("Android apps, on your iPhone.")
 +            Text(L("Android apps, on your iPhone."))
                  .font(.title3).foregroundStyle(.secondary)
-             Text("Husk runs a real Android system and opens APKs inside it. "
-                + "A few questions first — all of them can be changed later in Settings.")
-@@ -124,26 +124,26 @@ struct OnboardingView: View {
+-            Text("Husk runs a real Android system and opens APKs inside it. "
+-               + "A few questions first — all of them can be changed later in Settings.")
++            Text(L("Husk runs a real Android system and opens APKs inside it. A few questions first — all of them can be changed later in Settings."))
+                 .font(.callout).foregroundStyle(.secondary)
+                 .multilineTextAlignment(.center)
+                 .padding(.horizontal, 34).padding(.top, 4)
+@@ -124,26 +123,26 @@ struct OnboardingView: View {
      private var choices: some View {
          ScrollView {
              VStack(spacing: 14) {
@@ -3113,7 +3233,7 @@ index b1e4d9f..f5dfe26 100644
                         detail: "Saves the machine once Android settles, so later "
                               + "launches restore in seconds instead of booting.",
                         isOn: $autoSave)
-@@ -175,12 +175,12 @@ struct OnboardingView: View {
+@@ -175,12 +174,12 @@ struct OnboardingView: View {
  
      /// What the JIT page says is already in place, if anything.
      private var jitState: String? {
@@ -3131,16 +3251,20 @@ index b1e4d9f..f5dfe26 100644
          case nil: return nil
          }
      }
-@@ -191,7 +191,7 @@ struct OnboardingView: View {
+@@ -191,10 +190,8 @@ struct OnboardingView: View {
              Image(systemName: "bolt.fill")
                  .font(.system(size: 54))
                  .foregroundStyle(Theme.accent)
 -            Text("Turn on JIT").font(.largeTitle.weight(.semibold))
+-            Text("Android and Translation Layer games need JIT, which on iOS only an attached debugger can grant. "
+-               + "StikJIT is built into Husk and is the recommended way: it turns JIT on from inside the app, "
+-               + "with no computer and no other app. StikDebug and TrollStore work too.")
 +            Text(L("Turn on JIT")).font(.largeTitle.weight(.semibold))
-             Text("Android and Translation Layer games need JIT, which on iOS only an attached debugger can grant. "
-                + "StikJIT is built into Husk and is the recommended way: it turns JIT on from inside the app, "
-                + "with no computer and no other app. StikDebug and TrollStore work too.")
-@@ -202,7 +202,7 @@ struct OnboardingView: View {
++            Text(L("Android and Translation Layer games need JIT, which on iOS only an attached debugger can grant. StikJIT is built into Husk and is the recommended way: it turns JIT on from inside the app, with no computer and no other app. StikDebug and TrollStore work too."))
+                 .font(.callout).foregroundStyle(.secondary)
+                 .multilineTextAlignment(.center)
+                 .padding(.horizontal, 34)
+@@ -202,7 +199,7 @@ struct OnboardingView: View {
                  Label(state, systemImage: "checkmark.circle.fill")
                      .font(.callout.weight(.medium)).foregroundStyle(.green)
              }
@@ -3149,15 +3273,19 @@ index b1e4d9f..f5dfe26 100644
                  .font(.body.weight(.semibold))
                  .foregroundStyle(Theme.accent)
                  .padding(.top, 4)
-@@ -216,7 +216,7 @@ struct OnboardingView: View {
+@@ -216,10 +213,8 @@ struct OnboardingView: View {
              Image(systemName: "checkmark.seal.fill")
                  .font(.system(size: 62))
                  .foregroundStyle(Theme.accent)
 -            Text("Ready").font(.largeTitle.weight(.semibold))
+-            Text("If JIT is not on when Android starts, Husk turns it on with the "
+-               + "method you chose, or walks you through setting one up. You can "
+-               + "change it any time in Settings › JIT & sideload.")
 +            Text(L("Ready")).font(.largeTitle.weight(.semibold))
-             Text("If JIT is not on when Android starts, Husk turns it on with the "
-                + "method you chose, or walks you through setting one up. You can "
-                + "change it any time in Settings › JIT & sideload.")
++            Text(L("If JIT is not on when Android starts, Husk turns it on with the method you chose, or walks you through setting one up. You can change it any time in Settings › JIT & sideload."))
+                 .font(.callout).foregroundStyle(.secondary)
+                 .multilineTextAlignment(.center)
+                 .padding(.horizontal, 34)
 diff --git a/src/app/Husk/Play/GoogleSignInSheet.swift b/src/app/Husk/Play/GoogleSignInSheet.swift
 index 4dd8f8e..1b27055 100644
 --- a/src/app/Husk/Play/GoogleSignInSheet.swift
@@ -3482,19 +3610,22 @@ index 9a80693..a1c346d 100644
                          .padding(.horizontal, 24)
                          .padding(.vertical, 6)
 diff --git a/src/app/Husk/QemuRunner.swift b/src/app/Husk/QemuRunner.swift
-index 98bcd0f..f668715 100644
+index 98bcd0f..7c0754c 100644
 --- a/src/app/Husk/QemuRunner.swift
 +++ b/src/app/Husk/QemuRunner.swift
-@@ -305,7 +305,7 @@ final class QemuRunner: ObservableObject {
+@@ -303,9 +303,8 @@ final class QemuRunner: ObservableObject {
+     /// Opt-in, because turning it on invalidates any snapshot saved without one
+     /// and therefore costs a single cold boot before it pays for itself.
      nonisolated static var gpuModeEnabled: Bool {
-         // Absent means GPU: bool(forKey:) answers false for a key nobody
-         // has set, which quietly made the slow renderer the default.
+-        // Absent means GPU: bool(forKey:) answers false for a key nobody
+-        // has set, which quietly made the slow renderer the default.
 -        UserDefaults.standard.object(forKey: "husk.gpuMode") as? Bool ?? true
++        // iOS 15 starts with software rendering; GPU is an explicit experiment.
 +        UserDefaults.standard.object(forKey: "husk.gpuMode") as? Bool ?? false
      }
  
      /// Which display device the saved machine was built around.
-@@ -710,7 +710,7 @@ final class QemuRunner: ObservableObject {
+@@ -710,7 +709,7 @@ final class QemuRunner: ObservableObject {
      /// user the app. Evaluated once and cached, because the answer is used both
      /// to size the guest and to build the command line, and they must agree.
      private lazy var ramFileReady: Bool = {
@@ -3503,7 +3634,7 @@ index 98bcd0f..f668715 100644
          let dir = (guestRamPath as NSString).deletingLastPathComponent
  
          if let attrs = try? FileManager.default.attributesOfFileSystem(forPath: dir),
-@@ -751,11 +751,11 @@ final class QemuRunner: ObservableObject {
+@@ -751,11 +750,11 @@ final class QemuRunner: ObservableObject {
      /// than every launch.
      nonisolated var ramAttemptPath: String {
          FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -3517,7 +3648,7 @@ index 98bcd0f..f668715 100644
      }
      /// Smallest size ever seen to fail, remembered permanently.
      ///
-@@ -767,7 +767,7 @@ final class QemuRunner: ObservableObject {
+@@ -767,7 +766,7 @@ final class QemuRunner: ObservableObject {
      /// something smaller works.
      nonisolated var ramFailedPath: String {
          FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -3526,7 +3657,7 @@ index 98bcd0f..f668715 100644
      }
  
      private func readInt(_ path: String) -> Int? {
-@@ -966,7 +966,7 @@ final class QemuRunner: ObservableObject {
+@@ -966,7 +965,7 @@ final class QemuRunner: ObservableObject {
          // cannot be walked back. Another app reaching a larger number does not
          // transfer -- clean file-backed pages are evictable and charged
          // differently.
@@ -3535,10 +3666,14 @@ index 98bcd0f..f668715 100644
          let qemuOverheadMiB = 750 // measured, not guessed
          // Real margin, in megabytes rather than a fraction. A fraction of what
          // was left quietly cost ~375 MiB the guest could have had; the run that
-@@ -983,7 +983,9 @@ final class QemuRunner: ObservableObject {
-         // claims it before this runs, so os_proc_available_memory() has already
-         // fallen by that much -- subtracting again charged for it twice and cut
-         // the guest from 1906 MiB to 1650.
+@@ -979,11 +978,9 @@ final class QemuRunner: ObservableObject {
+             return 1536
+         }
+ 
+-        // The JIT is only subtracted if it has not been taken yet. Prewarming
+-        // claims it before this runs, so os_proc_available_memory() has already
+-        // fallen by that much -- subtracting again charged for it twice and cut
+-        // the guest from 1906 MiB to 1650.
 -        let jitStillToCome = JITBootstrap.prewarmed ? 0 : jitMiB
 +        // A prewarmed mapping reserves virtual space; untouched pages are not
 +        // necessarily charged by os_proc_available_memory yet. Budget the full region.
@@ -3546,7 +3681,7 @@ index 98bcd0f..f668715 100644
          let anonymousTarget = max(1024, min(6144,
              availableMiB - safetyMarginMiB - jitStillToCome - qemuOverheadMiB))
  
-@@ -1015,7 +1017,7 @@ final class QemuRunner: ObservableObject {
+@@ -1015,7 +1012,7 @@ final class QemuRunner: ObservableObject {
          // made for it -- the address space is there, the file maps and writes
          // -- and then killed qemu_init three times regardless. Whatever objects
          // to it is not something this code can see, so it is simply not offered.
@@ -3555,7 +3690,7 @@ index 98bcd0f..f668715 100644
  
          // Fold a failed attempt into the permanent floor before using it.
          if let attempted = readInt(ramAttemptPath), readInt(ramProvenPath) != attempted {
-@@ -1030,7 +1032,10 @@ final class QemuRunner: ObservableObject {
+@@ -1030,7 +1027,10 @@ final class QemuRunner: ObservableObject {
                                + "staying below it")
          }
          let fileBackedTarget = ramFileReady ? largestMappableMiB(candidates) : nil
@@ -3567,7 +3702,7 @@ index 98bcd0f..f668715 100644
  
          QemuRunner.shared.lastGuestMiB = target
          try? String(target).write(toFile: ramAttemptPath, atomically: true, encoding: .utf8)
-@@ -1218,6 +1223,20 @@ final class QemuRunner: ObservableObject {
+@@ -1218,6 +1218,20 @@ final class QemuRunner: ObservableObject {
          ] : [])
      }
  
@@ -3588,7 +3723,7 @@ index 98bcd0f..f668715 100644
      func start() {
          guard !isRunning else {
              HuskLog.log("qemu", "start() ignored -- already running")
-@@ -1302,6 +1321,7 @@ final class QemuRunner: ObservableObject {
+@@ -1302,6 +1316,7 @@ final class QemuRunner: ObservableObject {
      /// Creation is unconditional now. Only the *probe* is skipped once the
      /// answer is known, because that is the part that is merely a question.
      private func probeGL() {
@@ -3598,10 +3733,10 @@ index 98bcd0f..f668715 100644
          while HuskGLView.layerForGL == nil, Date() < deadline {
 diff --git a/src/app/Husk/Resources/en.lproj/Localizable.strings b/src/app/Husk/Resources/en.lproj/Localizable.strings
 new file mode 100644
-index 0000000..e24914a
+index 0000000..bea994b
 --- /dev/null
 +++ b/src/app/Husk/Resources/en.lproj/Localizable.strings
-@@ -0,0 +1,322 @@
+@@ -0,0 +1,359 @@
 +// Husk iOS 15 interface translations.
 +"1 pixel per point. Fastest." = "1 pixel per point. Fastest.";
 +"1.5 pixels per point." = "1.5 pixels per point.";
@@ -3924,6 +4059,43 @@ index 0000000..e24914a
 +"not started" = "not started";
 +"paired on this device" = "paired on this device";
 +"starting" = "starting";
++"Apps and games open in a window you can move, resize and minimise to a dock, like LiveContainer's multitasking. Each app can override this in its own settings." = "Apps and games open in a window you can move, resize and minimise to a dock, like LiveContainer's multitasking. Each app can override this in its own settings.";
++"The list is written to disk, so it is on screen before Android has finished starting." = "The list is written to disk, so it is on screen before Android has finished starting.";
++"Names and icons come from Android's own launcher, which keeps the version it draws. Re-fetching throws away Husk's copies and asks again." = "Names and icons come from Android's own launcher, which keeps the version it draws. Re-fetching throws away Husk's copies and asks again.";
++"Adds a sound device. While it is attached Android cannot be saved — QEMU refuses to snapshot a machine with one — so every launch boots from cold. Turning it on or off costs a cold boot either way." = "Adds a sound device. While it is attached Android cannot be saved — QEMU refuses to snapshot a machine with one — so every launch boots from cold. Turning it on or off costs a cold boot either way.";
++"The panel is built when the machine starts, so a change costs one cold boot, and the next save replaces the machine saved at the old size — changing back costs another. Sizes are rounded to a multiple of eight. Bigger is slower: every pixel is drawn by an emulated phone. Android's density does not change with the panel, so a larger one shows more rather than bigger." = "The panel is built when the machine starts, so a change costs one cold boot, and the next save replaces the machine saved at the old size — changing back costs another. Sizes are rounded to a multiple of eight. Bigger is slower: every pixel is drawn by an emulated phone. Android's density does not change with the panel, so a larger one shows more rather than bigger.";
++"Touch is always on. The keyboard and the rotate control are in the pill at the bottom of the guest's screen; a gamepad and a pointer are not wired through yet." = "Touch is always on. The keyboard and the rotate control are in the pill at the bottom of the guest's screen; a gamepad and a pointer are not wired through yet.";
++"Android reaches the internet through a virtual ethernet card on QEMU's own network. Nothing on your phone's network can see the guest, and the guest cannot see it." = "Android reaches the internet through a virtual ethernet card on QEMU's own network. Nothing on your phone's network can see the guest, and the guest cannot see it.";
++"Husk needs memory it can write and then execute, which on iOS takes an attached debugger. There are two ways to get it: a debugger that services trap requests, or a MAP_JIT mapping, which the kernel allows any debugged process. Either one is enough — which is available depends on the device and the iOS version, so Husk tests both rather than assuming." = "Husk needs memory it can write and then execute, which on iOS takes an attached debugger. There are two ways to get it: a debugger that services trap requests, or a MAP_JIT mapping, which the kernel allows any debugged process. Either one is enough — which is available depends on the device and the iOS version, so Husk tests both rather than assuming.";
++"Off by default. Husk detaches StikDebug as soon as the JIT region is held, because a debugger that iOS has suspended stops the whole app the next time it is needed. Turn this on only to collect StikDebug's own logs." = "Off by default. Husk detaches StikDebug as soon as the JIT region is held, because a debugger that iOS has suspended stops the whole app the next time it is needed. Turn this on only to collect StikDebug's own logs.";
++"APKs install from the Library's + button or from the Files tab. Split sets — a base APK plus its config pieces — must be picked together; installing the base alone fails on missing native libraries." = "APKs install from the Library's + button or from the Files tab. Split sets — a base APK plus its config pieces — must be picked together; installing the base alone fails on missing native libraries.";
++"Husk restores a saved machine instead of booting it, which takes seconds rather than minutes. The picture freezes while it writes. With this off, nothing saves by itself — including after an install." = "Husk restores a saved machine instead of booting it, which takes seconds rather than minutes. The picture freezes while it writes. With this off, nothing saves by itself — including after an install.";
++"Adds about 2 GB to the first download. It was captured on the software renderer, so it is not used on GPU — which cold-boots once and then saves its own." = "Adds about 2 GB to the first download. It was captured on the software renderer, so it is not used on GPU — which cold-boots once and then saves its own.";
++"When a new Android image or snapshot is published, Husk asks once whether to download it. Never asked before Android has been downloaded." = "When a new Android image or snapshot is published, Husk asks once whether to download it. Never asked before Android has been downloaded.";
++"System follows the phone: light by day, dark by night. The guest's own screen stays dark either way — it is a picture of another phone." = "System follows the phone: light by day, dark by night. The guest's own screen stays dark either way — it is a picture of another phone.";
++"Automatic follows the system appearance — light, dark and tinted. The others pin one look. iOS shows its own confirmation after a change; that alert cannot be turned off." = "Automatic follows the system appearance — light, dark and tinted. The others pin one look. iOS shows its own confirmation after a change; that alert cannot be turned off.";
++"Technical detail in the Android Translation Layer screens: library reports, device checks and run logs." = "Technical detail in the Android Translation Layer screens: library reports, device checks and run logs.";
++"Husk runs unmodified Android APKs in a real Android system on your iPhone. The console shows Husk's live log, the guest's serial output and QEMU's own output — the three files any problem here is diagnosed from." = "Husk runs unmodified Android APKs in a real Android system on your iPhone. The console shows Husk's live log, the guest's serial output and QEMU's own output — the three files any problem here is diagnosed from.";
++"This installation can only wait about 30 seconds in the background, so go to Settings straight away." = "This installation can only wait about 30 seconds in the background, so go to Settings straight away.";
++"Pick an APK or a bundle (.xapk, .apkm, .apks), or share one to Husk from Files or Safari. Games run straight on your iPhone. Other apps run inside Android." = "Pick an APK or a bundle (.xapk, .apkm, .apks), or share one to Husk from Files or Safari. Games run straight on your iPhone. Other apps run inside Android.";
++"Husk runs a real Android system and opens APKs inside it. A few questions first — all of them can be changed later in Settings." = "Husk runs a real Android system and opens APKs inside it. A few questions first — all of them can be changed later in Settings.";
++"Android and Translation Layer games need JIT, which on iOS only an attached debugger can grant. StikJIT is built into Husk and is the recommended way: it turns JIT on from inside the app, with no computer and no other app. StikDebug and TrollStore work too." = "Android and Translation Layer games need JIT, which on iOS only an attached debugger can grant. StikJIT is built into Husk and is the recommended way: it turns JIT on from inside the app, with no computer and no other app. StikDebug and TrollStore work too.";
++"If JIT is not on when Android starts, Husk turns it on with the method you chose, or walks you through setting one up. You can change it any time in Settings › JIT & sideload." = "If JIT is not on when Android starts, Husk turns it on with the method you chose, or walks you through setting one up. You can change it any time in Settings › JIT & sideload.";
++"JIT was already on when Husk opened." = "JIT was already on when Husk opened.";
++"A jailbreak was found. Turn on Allow JIT in Apps." = "A jailbreak was found. Turn on Allow JIT in Apps.";
++"Dopamine can give every app JIT with one setting." = "Dopamine can give every app JIT with one setting.";
++"For a Husk installed through TrollStore." = "For a Husk installed through TrollStore.";
++"Import a pairing file made on a computer." = "Import a pairing file made on a computer.";
++"With icons" = "With icons";
++"Pair on this device" = "Pair on this device";
++"On a device jailbroken with Dopamine, JIT is a setting: the jailbreak marks every app as debugged when it opens, and a debugged app may run code it wrote. Husk needs nothing else." = "On a device jailbroken with Dopamine, JIT is a setting: the jailbreak marks every app as debugged when it opens, and a debugged app may run code it wrote. Husk needs nothing else.";
++"Open Dopamine and go to its Settings." = "Open Dopamine and go to its Settings.";
++"Turn on Allow JIT in Apps." = "Turn on Allow JIT in Apps.";
++"Close Husk completely and open it again. The setting applies to apps as they start." = "Close Husk completely and open it again. The setting applies to apps as they start.";
++"TrollStore can enable JIT for apps it installed, with no pairing file, VPN or computer." = "TrollStore can enable JIT for apps it installed, with no pairing file, VPN or computer.";
++"Install Husk.ipa through TrollStore, on an iOS version TrollStore supports. It carries the entitlements TrollStore keeps, so the same file works there and in a sideloader." = "Install Husk.ipa through TrollStore, on an iOS version TrollStore supports. It carries the entitlements TrollStore keeps, so the same file works there and in a sideloader.";
++"In TrollStore's Settings, turn on URL Scheme. TrollStore ignores enable-jit requests without it." = "In TrollStore's Settings, turn on URL Scheme. TrollStore ignores enable-jit requests without it.";
++"Whenever Android or a game starts, Husk asks TrollStore to enable JIT. TrollStore opens Husk, attaches to it for a moment and lets go, which leaves it allowed to run code it wrote." = "Whenever Android or a game starts, Husk asks TrollStore to enable JIT. TrollStore opens Husk, attaches to it for a moment and lets go, which leaves it allowed to run code it wrote.";
 diff --git a/src/app/Husk/Resources/legal/LICENSE-NavigationBackport-MIT.txt b/src/app/Husk/Resources/legal/LICENSE-NavigationBackport-MIT.txt
 new file mode 100644
 index 0000000..27c7225
@@ -3951,10 +4123,10 @@ index 0000000..27c7225
 +THE SOFTWARE.
 diff --git a/src/app/Husk/Resources/ru.lproj/Localizable.strings b/src/app/Husk/Resources/ru.lproj/Localizable.strings
 new file mode 100644
-index 0000000..eeffb05
+index 0000000..31e2c13
 --- /dev/null
 +++ b/src/app/Husk/Resources/ru.lproj/Localizable.strings
-@@ -0,0 +1,322 @@
+@@ -0,0 +1,359 @@
 +// Husk iOS 15 interface translations.
 +"1 pixel per point. Fastest." = "1 пиксель на точку. Самый быстрый вариант.";
 +"1.5 pixels per point." = "1,5 пикселя на точку.";
@@ -4277,6 +4449,43 @@ index 0000000..eeffb05
 +"not started" = "не запущен";
 +"paired on this device" = "сопряжение создано на этом устройстве";
 +"starting" = "запуск";
++"Apps and games open in a window you can move, resize and minimise to a dock, like LiveContainer's multitasking. Each app can override this in its own settings." = "Приложение откроется в окне, которое можно перемещать, менять в размере и сворачивать. Режим можно изменить отдельно в настройках каждого приложения.";
++"The list is written to disk, so it is on screen before Android has finished starting." = "Список хранится на устройстве и доступен ещё до завершения загрузки Android.";
++"Names and icons come from Android's own launcher, which keeps the version it draws. Re-fetching throws away Husk's copies and asks again." = "Названия и значки поступают из Android. Повторная загрузка заменяет их копии в Husk.";
++"Adds a sound device. While it is attached Android cannot be saved — QEMU refuses to snapshot a machine with one — so every launch boots from cold. Turning it on or off costs a cold boot either way." = "Подключает звуковое устройство. QEMU не сохраняет снимки машины с этим устройством, поэтому Android каждый раз загружается с нуля. Смена этой настройки также требует полной загрузки.";
++"The panel is built when the machine starts, so a change costs one cold boot, and the next save replaces the machine saved at the old size — changing back costs another. Sizes are rounded to a multiple of eight. Bigger is slower: every pixel is drawn by an emulated phone. Android's density does not change with the panel, so a larger one shows more rather than bigger." = "Смена разрешения требует полной загрузки Android. Новый снимок заменит сохранённую машину со старым размером экрана. Размеры округляются до кратных восьми. Большое разрешение снижает скорость и позволяет разместить больше элементов.";
++"Touch is always on. The keyboard and the rotate control are in the pill at the bottom of the guest's screen; a gamepad and a pointer are not wired through yet." = "Касания работают всегда. Клавиатура и поворот доступны в панели внизу экрана Android. Передача геймпада и мыши пока не реализована.";
++"Android reaches the internet through a virtual ethernet card on QEMU's own network. Nothing on your phone's network can see the guest, and the guest cannot see it." = "Android подключается к интернету через виртуальную сетевую карту QEMU. Входящие подключения ограничены настройками виртуальной сети.";
++"Husk needs memory it can write and then execute, which on iOS takes an attached debugger. There are two ways to get it: a debugger that services trap requests, or a MAP_JIT mapping, which the kernel allows any debugged process. Either one is enough — which is available depends on the device and the iOS version, so Husk tests both rather than assuming." = "Для JIT нужна память, в которую можно записывать и затем выполнять код. На iOS 15 Husk проверяет доступные способы выделения такой памяти. Используйте TrollStore или Dopamine с включённой настройкой Allow JIT in Apps.";
++"Off by default. Husk detaches StikDebug as soon as the JIT region is held, because a debugger that iOS has suspended stops the whole app the next time it is needed. Turn this on only to collect StikDebug's own logs." = "По умолчанию выключено. Отладчик отключается после выделения памяти JIT. Эта настройка нужна для сбора журналов StikDebug на поддерживаемых версиях iOS; на iOS 15 StikDebug недоступен.";
++"APKs install from the Library's + button or from the Files tab. Split sets — a base APK plus its config pieces — must be picked together; installing the base alone fails on missing native libraries." = "Установить APK можно кнопкой «+» в библиотеке или через вкладку «Файлы». Для split APK выбирайте основной пакет и все его части вместе, иначе приложению будет не хватать библиотек.";
++"Husk restores a saved machine instead of booting it, which takes seconds rather than minutes. The picture freezes while it writes. With this off, nothing saves by itself — including after an install." = "Husk восстанавливает сохранённую машину вместо полной загрузки. Во время сохранения изображение замирает. Если автосохранение выключено, состояние нужно сохранять вручную, в том числе после установки приложений.";
++"Adds about 2 GB to the first download. It was captured on the software renderer, so it is not used on GPU — which cold-boots once and then saves its own." = "Дополнительно скачивает около 2 ГБ. Снимок создан с программной графикой и требует совместимой конфигурации памяти. Режим GPU начинает загрузку с нуля и сохраняет собственный снимок.";
++"When a new Android image or snapshot is published, Husk asks once whether to download it. Never asked before Android has been downloaded." = "Когда выходит новый образ Android или снимок, Husk предлагает его скачать. Предложения появятся только после первой установки Android.";
++"System follows the phone: light by day, dark by night. The guest's own screen stays dark either way — it is a picture of another phone." = "Системная тема повторяет оформление iPhone. Эта настройка меняет интерфейс Husk, но не тему внутри Android.";
++"Automatic follows the system appearance — light, dark and tinted. The others pin one look. iOS shows its own confirmation after a change; that alert cannot be turned off." = "Автоматический режим следует оформлению системы. Остальные варианты фиксируют вид значка. После смены значка iOS показывает своё подтверждение.";
++"Technical detail in the Android Translation Layer screens: library reports, device checks and run logs." = "Технические сведения на экранах трансляции: отчёты о библиотеках, проверки устройства и журналы запуска.";
++"Husk runs unmodified Android APKs in a real Android system on your iPhone. The console shows Husk's live log, the guest's serial output and QEMU's own output — the three files any problem here is diagnosed from." = "Husk запускает Android-приложения через трансляцию или эмуляцию Android. Совместимость зависит от приложения и устройства. В консоли доступны журналы Husk, Android и QEMU для диагностики.";
++"This installation can only wait about 30 seconds in the background, so go to Settings straight away." = "В фоне эта установка может ждать около 30 секунд. Сразу перейдите в настройки.";
++"Pick an APK or a bundle (.xapk, .apkm, .apks), or share one to Husk from Files or Safari. Games run straight on your iPhone. Other apps run inside Android." = "Выберите APK или набор пакетов (.xapk, .apkm, .apks), либо отправьте его в Husk из «Файлов» или Safari. Доступны трансляция и запуск внутри Android; совместимость зависит от приложения.";
++"Husk runs a real Android system and opens APKs inside it. A few questions first — all of them can be changed later in Settings." = "Husk запускает Android и поддерживаемые APK. Сначала выберите основные настройки — их можно изменить позже.";
++"Android and Translation Layer games need JIT, which on iOS only an attached debugger can grant. StikJIT is built into Husk and is the recommended way: it turns JIT on from inside the app, with no computer and no other app. StikDebug and TrollStore work too." = "Для Android и трансляции нужен JIT. В этой сборке для iOS 15 используйте TrollStore или Dopamine с включённой настройкой Allow JIT in Apps. Встроенное сопряжение и StikDebug на iOS 15 недоступны.";
++"If JIT is not on when Android starts, Husk turns it on with the method you chose, or walks you through setting one up. You can change it any time in Settings › JIT & sideload." = "Если JIT недоступен, Husk предложит его настроить. Выбор можно изменить в разделе «Настройки → JIT и установка приложений».";
++"JIT was already on when Husk opened." = "JIT уже был включён при открытии Husk.";
++"A jailbreak was found. Turn on Allow JIT in Apps." = "Обнаружен джейлбрейк. Включите Allow JIT in Apps в Dopamine.";
++"Dopamine can give every app JIT with one setting." = "Dopamine позволяет включить JIT настройкой Allow JIT in Apps.";
++"For a Husk installed through TrollStore." = "Для Husk, установленного через TrollStore.";
++"Import a pairing file made on a computer." = "Импортировать файл сопряжения, созданный на компьютере.";
++"With icons" = "Со значками";
++"Pair on this device" = "Сопряжение на этом устройстве";
++"On a device jailbroken with Dopamine, JIT is a setting: the jailbreak marks every app as debugged when it opens, and a debugged app may run code it wrote. Husk needs nothing else." = "В Dopamine JIT включается настройкой Allow JIT in Apps. Права применяются при запуске приложения, поэтому после изменения настройки нужно полностью перезапустить Husk.";
++"Open Dopamine and go to its Settings." = "Откройте Dopamine и перейдите в его настройки.";
++"Turn on Allow JIT in Apps." = "Включите Allow JIT in Apps (разрешить JIT в приложениях).";
++"Close Husk completely and open it again. The setting applies to apps as they start." = "Полностью закройте Husk и откройте снова. Настройка применяется при запуске приложений.";
++"TrollStore can enable JIT for apps it installed, with no pairing file, VPN or computer." = "TrollStore может включать JIT для установленных через него приложений без файла сопряжения, VPN или компьютера.";
++"Install Husk.ipa through TrollStore, on an iOS version TrollStore supports. It carries the entitlements TrollStore keeps, so the same file works there and in a sideloader." = "Установите Husk-iOS15.tipa через TrollStore на поддерживаемой версии iOS. Этот пакет подготовлен для установки через TrollStore.";
++"In TrollStore's Settings, turn on URL Scheme. TrollStore ignores enable-jit requests without it." = "В настройках TrollStore включите URL Scheme. Без этой настройки TrollStore игнорирует запросы на включение JIT.";
++"Whenever Android or a game starts, Husk asks TrollStore to enable JIT. TrollStore opens Husk, attaches to it for a moment and lets go, which leaves it allowed to run code it wrote." = "При запуске Android или приложения Husk запрашивает включение JIT через TrollStore. Краткое подключение отладчика даёт Husk право выполнять сгенерированный код.";
 diff --git a/src/app/Husk/RuntimeSession.swift b/src/app/Husk/RuntimeSession.swift
 new file mode 100644
 index 0000000..7b67767
@@ -4312,7 +4521,7 @@ index 0000000..7b67767
 +    }
 +}
 diff --git a/src/app/Husk/SettingsTab.swift b/src/app/Husk/SettingsTab.swift
-index 5240506..7e9fba4 100644
+index 5240506..7a9b478 100644
 --- a/src/app/Husk/SettingsTab.swift
 +++ b/src/app/Husk/SettingsTab.swift
 @@ -1,43 +1,52 @@
@@ -4379,15 +4588,16 @@ index 5240506..7e9fba4 100644
                                  .frame(width: 30, height: 30)
                                  .overlay {
                                      Image(systemName: "macwindow.on.rectangle")
-@@ -47,20 +56,20 @@ struct SettingsTab: View {
+@@ -47,20 +56,19 @@ struct SettingsTab: View {
                          }
                      }
                  } header: {
 -                    Text("Multitasking")
 +                    Text(L("Multitasking"))
                  } footer: {
-                     Text("Apps and games open in a window you can move, resize and minimise to a dock, like LiveContainer's multitasking. "
-                        + "Each app can override this in its own settings.")
+-                    Text("Apps and games open in a window you can move, resize and minimise to a dock, like LiveContainer's multitasking. "
+-                       + "Each app can override this in its own settings.")
++                    Text(L("Apps and games open in a window you can move, resize and minimise to a dock, like LiveContainer's multitasking. Each app can override this in its own settings."))
                  }
  
 -                Section("Emulator") {
@@ -4406,7 +4616,7 @@ index 5240506..7e9fba4 100644
          }
      }
  
-@@ -87,7 +96,7 @@ struct SettingsTab: View {
+@@ -87,7 +95,7 @@ struct SettingsTab: View {
                  }
              } icon: {
                  RoundedRectangle(cornerRadius: 7, style: .continuous)
@@ -4415,16 +4625,24 @@ index 5240506..7e9fba4 100644
                      .frame(width: 30, height: 30)
                      .overlay {
                          Image(systemName: icon)
-@@ -119,7 +128,7 @@ struct LibrarySettings: View {
+@@ -119,13 +127,12 @@ struct LibrarySettings: View {
      var body: some View {
          Form {
              Section {
 -                DetailRow(label: "Apps", value: "\(host.packages.count)", mono: false)
+-                DetailRow(label: "With icons",
 +                DetailRow(label: L("Apps"), value: "\(host.packages.count)", mono: false)
-                 DetailRow(label: "With icons",
++                DetailRow(label: L("With icons"),
                            value: "\(host.packages.filter { $0.iconPath != nil }.count)",
                            mono: false)
-@@ -133,7 +142,7 @@ struct LibrarySettings: View {
+             } footer: {
+-                Text("The list is written to disk, so it is on screen before Android "
+-                   + "has finished starting.")
++                Text(L("The list is written to disk, so it is on screen before Android has finished starting."))
+             }
+ 
+             Section {
+@@ -133,7 +140,7 @@ struct LibrarySettings: View {
                      working = true
                      Task { await host.refreshPackages(); working = false }
                  } label: {
@@ -4433,7 +4651,7 @@ index 5240506..7e9fba4 100644
                            systemImage: "arrow.clockwise")
                  }
                  .disabled(working || !host.isReady)
-@@ -143,7 +152,7 @@ struct LibrarySettings: View {
+@@ -143,17 +150,15 @@ struct LibrarySettings: View {
                      working = true
                      Task { await host.refreshPackages(); working = false }
                  } label: {
@@ -4442,7 +4660,10 @@ index 5240506..7e9fba4 100644
                  }
                  .disabled(working || !host.isReady)
              } footer: {
-@@ -153,7 +162,7 @@ struct LibrarySettings: View {
+-                Text("Names and icons come from Android's own launcher, which keeps "
+-                   + "the version it draws. Re-fetching throws away Husk's copies and "
+-                   + "asks again.")
++                Text(L("Names and icons come from Android's own launcher, which keeps the version it draws. Re-fetching throws away Husk's copies and asks again."))
              }
          }
          .huskForm()
@@ -4451,7 +4672,7 @@ index 5240506..7e9fba4 100644
      }
  }
  
-@@ -162,7 +171,7 @@ struct LibrarySettings: View {
+@@ -162,7 +167,7 @@ struct LibrarySettings: View {
  struct PerformanceSettings: View {
      @ObservedObject private var runner = QemuRunner.shared
      @State private var gpuMode =
@@ -4460,7 +4681,7 @@ index 5240506..7e9fba4 100644
      @State private var sound = UserDefaults.standard.bool(forKey: "husk.sound")
      @State private var soundDevice =
          UserDefaults.standard.object(forKey: "husk.soundDevice") as? Bool ?? true
-@@ -170,7 +179,7 @@ struct PerformanceSettings: View {
+@@ -170,7 +175,7 @@ struct PerformanceSettings: View {
      var body: some View {
          Form {
              Section {
@@ -4469,7 +4690,7 @@ index 5240506..7e9fba4 100644
                      Text("GPU").tag(true)
                      Text("CPU").tag(false)
                  }
-@@ -180,39 +189,37 @@ struct PerformanceSettings: View {
+@@ -180,48 +185,43 @@ struct PerformanceSettings: View {
                      HuskLog.log("ui", v ? "GPU renderer selected" : "CPU renderer selected")
                  }
              } header: {
@@ -4516,9 +4737,11 @@ index 5240506..7e9fba4 100644
 -                Text("Sound")
 +                Text(L("Sound"))
              } footer: {
-                 Text("Adds a sound device. While it is attached Android cannot be "
-                    + "saved — QEMU refuses to snapshot a machine with one — so every "
-@@ -221,7 +228,7 @@ struct PerformanceSettings: View {
+-                Text("Adds a sound device. While it is attached Android cannot be "
+-                   + "saved — QEMU refuses to snapshot a machine with one — so every "
+-                   + "launch boots from cold. Turning it on or off costs a cold boot "
+-                   + "either way.")
++                Text(L("Adds a sound device. While it is attached Android cannot be saved — QEMU refuses to snapshot a machine with one — so every launch boots from cold. Turning it on or off costs a cold boot either way."))
              }
          }
          .huskForm()
@@ -4527,7 +4750,7 @@ index 5240506..7e9fba4 100644
      }
  }
  
-@@ -259,9 +266,9 @@ struct InputSettings: View {
+@@ -259,9 +259,9 @@ struct InputSettings: View {
      var body: some View {
          Form {
              Section {
@@ -4540,7 +4763,7 @@ index 5240506..7e9fba4 100644
                  }
                  .pickerStyle(.segmented)
                  .disabled(customRes)
-@@ -271,7 +278,7 @@ struct InputSettings: View {
+@@ -271,7 +271,7 @@ struct InputSettings: View {
                                          : "guest panel will be portrait")
                  }
              } header: {
@@ -4549,7 +4772,7 @@ index 5240506..7e9fba4 100644
              } footer: {
                  Text(customRes
                       ? "A custom resolution sets the shape itself, so this does nothing "
-@@ -284,7 +291,7 @@ struct InputSettings: View {
+@@ -284,7 +284,7 @@ struct InputSettings: View {
              }
  
              Section {
@@ -4558,7 +4781,7 @@ index 5240506..7e9fba4 100644
                      .onChange(of: customRes) { v in
                          UserDefaults.standard.set(v, forKey: "husk.customRes")
                          store()
-@@ -294,7 +301,7 @@ struct InputSettings: View {
+@@ -294,7 +294,7 @@ struct InputSettings: View {
                      }
  
                  if customRes {
@@ -4567,7 +4790,7 @@ index 5240506..7e9fba4 100644
                          get: { presetIndex },
                          set: { i in
                              guard i >= 0, i < Self.presets.count else { return }
-@@ -305,11 +312,11 @@ struct InputSettings: View {
+@@ -305,11 +305,11 @@ struct InputSettings: View {
                          ForEach(0..<Self.presets.count, id: \.self) { i in
                              Text(Self.presets[i].name).tag(i)
                          }
@@ -4581,7 +4804,7 @@ index 5240506..7e9fba4 100644
                          Spacer()
                          TextField("720", text: $widthText)
                              .keyboardType(.numberPad)
-@@ -319,7 +326,7 @@ struct InputSettings: View {
+@@ -319,7 +319,7 @@ struct InputSettings: View {
                              .onChange(of: widthText) { _ in store() }
                      }
                      HStack {
@@ -4590,7 +4813,7 @@ index 5240506..7e9fba4 100644
                          Spacer()
                          TextField("1280", text: $heightText)
                              .keyboardType(.numberPad)
-@@ -333,14 +340,14 @@ struct InputSettings: View {
+@@ -333,40 +333,33 @@ struct InputSettings: View {
                          DetailRow(label: "Android will get",
                                    value: "\(size.w) × \(size.h)")
                      } else {
@@ -4605,10 +4828,20 @@ index 5240506..7e9fba4 100644
 -                Text("Resolution")
 +                Text(L("Resolution"))
              } footer: {
-                 Text("The panel is built when the machine starts, so a change costs "
-                    + "one cold boot, and the next save replaces the machine saved at "
-@@ -356,17 +363,17 @@ struct InputSettings: View {
-                    + "and a pointer are not wired through yet.")
+-                Text("The panel is built when the machine starts, so a change costs "
+-                   + "one cold boot, and the next save replaces the machine saved at "
+-                   + "the old size — changing back costs another. Sizes are rounded "
+-                   + "to a multiple of eight. Bigger is slower: every pixel is drawn "
+-                   + "by an emulated phone. Android's density does not change with "
+-                   + "the panel, so a larger one shows more rather than bigger.")
++                Text(L("The panel is built when the machine starts, so a change costs one cold boot, and the next save replaces the machine saved at the old size — changing back costs another. Sizes are rounded to a multiple of eight. Bigger is slower: every pixel is drawn by an emulated phone. Android's density does not change with the panel, so a larger one shows more rather than bigger."))
+             }
+ 
+             Section {
+-                Text("Touch is always on. The keyboard and the rotate control are "
+-                   + "in the pill at the bottom of the guest's screen; a gamepad "
+-                   + "and a pointer are not wired through yet.")
++                Text(L("Touch is always on. The keyboard and the rotate control are in the pill at the bottom of the guest's screen; a gamepad and a pointer are not wired through yet."))
                      .font(.footnote).foregroundStyle(.secondary)
              } header: {
 -                Text("Controls")
@@ -4628,7 +4861,7 @@ index 5240506..7e9fba4 100644
          return "\(QemuRunner.lastGuestRes.w) × \(QemuRunner.lastGuestRes.h)"
      }
  
-@@ -391,7 +398,7 @@ struct NetworkSettings: View {
+@@ -391,7 +384,7 @@ struct NetworkSettings: View {
      var body: some View {
          Form {
              Section {
@@ -4637,8 +4870,14 @@ index 5240506..7e9fba4 100644
                      .onChange(of: keepNetwork) { v in
                          UserDefaults.standard.set(v, forKey: "husk.keepNetwork")
                      }
-@@ -410,11 +417,11 @@ struct NetworkSettings: View {
-                    + "the guest, and the guest cannot see it.")
+@@ -405,16 +398,14 @@ struct NetworkSettings: View {
+             }
+ 
+             Section {
+-                Text("Android reaches the internet through a virtual ethernet card "
+-                   + "on QEMU's own network. Nothing on your phone's network can see "
+-                   + "the guest, and the guest cannot see it.")
++                Text(L("Android reaches the internet through a virtual ethernet card on QEMU's own network. Nothing on your phone's network can see the guest, and the guest cannot see it."))
                      .font(.footnote).foregroundStyle(.secondary)
              } header: {
 -                Text("How it connects")
@@ -4651,7 +4890,7 @@ index 5240506..7e9fba4 100644
      }
  }
  
-@@ -429,9 +436,9 @@ struct JITSettings: View {
+@@ -429,9 +420,9 @@ struct JITSettings: View {
  
      private var pairingLabel: String {
          switch jit.pairingSource {
@@ -4664,7 +4903,7 @@ index 5240506..7e9fba4 100644
          }
      }
  
-@@ -444,7 +451,7 @@ struct JITSettings: View {
+@@ -444,7 +435,7 @@ struct JITSettings: View {
              .listRowBackground(Color.clear)
  
              Section {
@@ -4673,7 +4912,7 @@ index 5240506..7e9fba4 100644
                      ForEach(JITMethod.allCases) { Text($0.title).tag($0) }
                  }
                  DetailRow(label: "StikDebug",
-@@ -460,10 +467,10 @@ struct JITSettings: View {
+@@ -460,10 +451,10 @@ struct JITSettings: View {
                  Button {
                      jit.showSetup = true
                  } label: {
@@ -4686,7 +4925,7 @@ index 5240506..7e9fba4 100644
              } footer: {
                  Text(jit.method == .automatic
                       ? jit.automaticDescription + " Built-in StikJIT needs iOS 26, LocalDevVPN, and a "
-@@ -513,7 +520,7 @@ struct JITSettings: View {
+@@ -513,22 +504,17 @@ struct JITSettings: View {
                      Button {
                          _ = JITBootstrap.requestTrollStoreAttach()
                      } label: {
@@ -4695,7 +4934,15 @@ index 5240506..7e9fba4 100644
                      }
                  }
              } header: {
-@@ -528,7 +535,7 @@ struct JITSettings: View {
+                 Text("JIT")
+             } footer: {
+-                Text("Husk needs memory it can write and then execute, which on iOS "
+-                   + "takes an attached debugger. There are two ways to get it: a "
+-                   + "debugger that services trap requests, or a MAP_JIT mapping, "
+-                   + "which the kernel allows any debugged process. Either one is "
+-                   + "enough — which is available depends on the device and the iOS "
+-                   + "version, so Husk tests both rather than assuming.")
++                Text(L("Husk needs memory it can write and then execute, which on iOS takes an attached debugger. There are two ways to get it: a debugger that services trap requests, or a MAP_JIT mapping, which the kernel allows any debugged process. Either one is enough — which is available depends on the device and the iOS version, so Husk tests both rather than assuming."))
              }
  
              Section {
@@ -4704,7 +4951,7 @@ index 5240506..7e9fba4 100644
                      .disabled(!HuskBuiltInJIT.isAvailable)
              } footer: {
                  Text(HuskBuiltInJIT.isAvailable
-@@ -538,16 +545,16 @@ struct JITSettings: View {
+@@ -538,36 +524,30 @@ struct JITSettings: View {
              }
  
              Section {
@@ -4723,9 +4970,19 @@ index 5240506..7e9fba4 100644
 +                Toggle(L("Keep debugger attached"), isOn: $keepAttached)
                      .onChange(of: keepAttached) { v in JITBootstrap.keepDebuggerAttached = v }
              } footer: {
-                 Text("Off by default. Husk detaches StikDebug as soon as the "
-@@ -563,11 +570,11 @@ struct JITSettings: View {
-                    + "libraries.")
+-                Text("Off by default. Husk detaches StikDebug as soon as the "
+-                   + "JIT region is held, because a debugger that iOS has suspended "
+-                   + "stops the whole app the next time it is needed. Turn this on "
+-                   + "only to collect StikDebug's own logs.")
++                Text(L("Off by default. Husk detaches StikDebug as soon as the JIT region is held, because a debugger that iOS has suspended stops the whole app the next time it is needed. Turn this on only to collect StikDebug's own logs."))
+             }
+ 
+             Section {
+-                Text("APKs install from the Library's + button or from the Files tab. "
+-                   + "Split sets — a base APK plus its config pieces — must be picked "
+-                   + "together; installing the base alone fails on missing native "
+-                   + "libraries.")
++                Text(L("APKs install from the Library's + button or from the Files tab. Split sets — a base APK plus its config pieces — must be picked together; installing the base alone fails on missing native libraries."))
                      .font(.footnote).foregroundStyle(.secondary)
              } header: {
 -                Text("Sideloading")
@@ -4738,7 +4995,7 @@ index 5240506..7e9fba4 100644
      }
  }
  
-@@ -586,7 +593,7 @@ struct SavedMachineSettings: View {
+@@ -586,7 +566,7 @@ struct SavedMachineSettings: View {
      var body: some View {
          Form {
              Section {
@@ -4747,7 +5004,7 @@ index 5240506..7e9fba4 100644
                      .onChange(of: autoSave) { v in
                          UserDefaults.standard.set(v, forKey: "husk.autoSave")
                          HuskLog.log("ui", v ? "automatic saving on" : "automatic saving off")
-@@ -594,7 +601,7 @@ struct SavedMachineSettings: View {
+@@ -594,20 +574,17 @@ struct SavedMachineSettings: View {
                  Button {
                      QemuRunner.shared.saveState(reason: "asked from settings")
                  } label: {
@@ -4756,7 +5013,13 @@ index 5240506..7e9fba4 100644
                            systemImage: "externaldrive.badge.checkmark")
                  }
                  .disabled(runner.isSavingState)
-@@ -607,7 +614,7 @@ struct SavedMachineSettings: View {
+             } footer: {
+-                Text("Husk restores a saved machine instead of booting it, which takes "
+-                   + "seconds rather than minutes. The picture freezes while it writes. "
+-                   + "With this off, nothing saves by itself — including after an "
+-                   + "install.")
++                Text(L("Husk restores a saved machine instead of booting it, which takes seconds rather than minutes. The picture freezes while it writes. With this off, nothing saves by itself — including after an install."))
+             }
  
              Section {
                  Button(role: .destructive) { askWhichToDelete = true } label: {
@@ -4765,7 +5028,7 @@ index 5240506..7e9fba4 100644
                  }
                  .disabled(!QemuRunner.shared.hasSnapshot)
                  if let deleteResult {
-@@ -622,7 +629,7 @@ struct SavedMachineSettings: View {
+@@ -622,32 +599,29 @@ struct SavedMachineSettings: View {
              }
  
              Section {
@@ -4774,15 +5037,20 @@ index 5240506..7e9fba4 100644
                      .onChange(of: useSnapshot) { v in
                          UserDefaults.standard.set(v, forKey: "husk.downloadSnapshot")
                      }
-@@ -633,21 +640,21 @@ struct SavedMachineSettings: View {
+             } footer: {
+-                Text("Adds about 2 GB to the first download. It was captured on the "
+-                   + "software renderer, so it is not used on GPU — which cold-boots "
+-                   + "once and then saves its own.")
++                Text(L("Adds about 2 GB to the first download. It was captured on the software renderer, so it is not used on GPU — which cold-boots once and then saves its own."))
              }
  
              Section {
 -                Toggle("Ask about Android updates", isOn: $askUpdates)
 +                Toggle(L("Ask about Android updates"), isOn: $askUpdates)
              } footer: {
-                 Text("When a new Android image or snapshot is published, Husk asks once whether to download it. "
-                    + "Never asked before Android has been downloaded.")
+-                Text("When a new Android image or snapshot is published, Husk asks once whether to download it. "
+-                   + "Never asked before Android has been downloaded.")
++                Text(L("When a new Android image or snapshot is published, Husk asks once whether to download it. Never asked before Android has been downloaded."))
              }
          }
          .huskForm()
@@ -4802,7 +5070,7 @@ index 5240506..7e9fba4 100644
          }
      }
  
-@@ -674,7 +681,7 @@ struct AppearanceSettings: View {
+@@ -674,7 +648,7 @@ struct AppearanceSettings: View {
      var body: some View {
          Form {
              Section {
@@ -4811,16 +5079,20 @@ index 5240506..7e9fba4 100644
                      ForEach(Theme.Appearance.allCases) { Text($0.title).tag($0) }
                  }
                  .pickerStyle(.segmented)
-@@ -682,7 +689,7 @@ struct AppearanceSettings: View {
+@@ -682,10 +656,9 @@ struct AppearanceSettings: View {
                      HuskLog.log("ui", "appearance: \(v.rawValue)")
                  }
              } header: {
 -                Text("Theme")
 +                Text(L("Theme"))
              } footer: {
-                 Text("System follows the phone: light by day, dark by night. The guest's own "
-                    + "screen stays dark either way — it is a picture of another phone.")
-@@ -703,12 +710,12 @@ struct AppearanceSettings: View {
+-                Text("System follows the phone: light by day, dark by night. The guest's own "
+-                   + "screen stays dark either way — it is a picture of another phone.")
++                Text(L("System follows the phone: light by day, dark by night. The guest's own screen stays dark either way — it is a picture of another phone."))
+             }
+ 
+             Section {
+@@ -703,12 +676,12 @@ struct AppearanceSettings: View {
                  }
                  .padding(.vertical, 6)
  
@@ -4836,15 +5108,16 @@ index 5240506..7e9fba4 100644
              }
  
              Section {
-@@ -739,13 +746,13 @@ struct AppearanceSettings: View {
+@@ -739,13 +712,12 @@ struct AppearanceSettings: View {
                  }
                  .padding(.vertical, 6)
              } header: {
 -                Text("App Icon")
 +                Text(L("App Icon"))
              } footer: {
-                 Text("Automatic follows the system appearance — light, dark and tinted. The others pin "
-                    + "one look. iOS shows its own confirmation after a change; that alert cannot be turned off.")
+-                Text("Automatic follows the system appearance — light, dark and tinted. The others pin "
+-                   + "one look. iOS shows its own confirmation after a change; that alert cannot be turned off.")
++                Text(L("Automatic follows the system appearance — light, dark and tinted. The others pin one look. iOS shows its own confirmation after a change; that alert cannot be turned off."))
              }
          }
 -        .navigationTitle("Appearance")
@@ -4852,7 +5125,7 @@ index 5240506..7e9fba4 100644
          .navigationBarTitleDisplayMode(.inline)
      }
  
-@@ -787,9 +794,9 @@ struct AboutSettings: View {
+@@ -787,9 +759,9 @@ struct AboutSettings: View {
              }
  
              Section {
@@ -4865,16 +5138,17 @@ index 5240506..7e9fba4 100644
                                 value: runner.displayKind == .gl ? "GPU"
                                      : runner.displayKind == .software ? "CPU"
                                      : "Not started")
-@@ -798,7 +805,7 @@ struct AboutSettings: View {
+@@ -798,30 +770,27 @@ struct AboutSettings: View {
              Section {
                  Toggle(isOn: $devInfo) {
                      VStack(alignment: .leading, spacing: 3) {
 -                        Text("Developer Info")
+-                        Text("Technical detail in the Android Translation Layer screens: "
+-                           + "library reports, device checks and run logs.")
 +                        Text(L("Developer Info"))
-                         Text("Technical detail in the Android Translation Layer screens: "
-                            + "library reports, device checks and run logs.")
++                        Text(L("Technical detail in the Android Translation Layer screens: library reports, device checks and run logs."))
                              .font(.caption).foregroundStyle(.secondary)
-@@ -806,14 +813,14 @@ struct AboutSettings: View {
+                     }
                  }
                  if devInfo {
                      NavigationLink { TLChecksView() } label: {
@@ -4891,9 +5165,10 @@ index 5240506..7e9fba4 100644
 +                    Label(L("Open Console"), systemImage: "terminal")
                  }
              } footer: {
-                 Text("Husk runs unmodified Android APKs in a real Android system on your iPhone. "
-@@ -821,7 +828,7 @@ struct AboutSettings: View {
-                    + "output — the three files any problem here is diagnosed from.")
+-                Text("Husk runs unmodified Android APKs in a real Android system on your iPhone. "
+-                   + "The console shows Husk's live log, the guest's serial output and QEMU's own "
+-                   + "output — the three files any problem here is diagnosed from.")
++                Text(L("Husk runs unmodified Android APKs in a real Android system on your iPhone. The console shows Husk's live log, the guest's serial output and QEMU's own output — the three files any problem here is diagnosed from."))
              }
          }
 -        .navigationTitle("About")
@@ -5747,7 +6022,7 @@ index 0000000..20d4f74
 +    unittest.main()
 diff --git a/tests/test_ios15_runtime.py b/tests/test_ios15_runtime.py
 new file mode 100644
-index 0000000..0aa1a99
+index 0000000..bedc851
 --- /dev/null
 +++ b/tests/test_ios15_runtime.py
 @@ -0,0 +1,65 @@
@@ -5780,7 +6055,7 @@ index 0000000..0aa1a99
 +        with zipfile.ZipFile(self.root/'java-runtime/framework-res.apk', 'w') as z:
 +            z.writestr('resources.arsc', b'resources')
 +        for relative in ['java-runtime/com.android.i18n/etc/icu/icudt.dat',
-+                         'java-runtime/com.android.tzdata/etc/tzdata',
++                         'java-runtime/com.android.tzdata/etc/tz/tzdata',
 +                         'android-system/fonts/Roboto.ttf', 'android-system/cacerts/0000.0',
 +                         'android-system/etc/fonts.xml']:
 +            p = self.root/relative

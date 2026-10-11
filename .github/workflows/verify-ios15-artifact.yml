@@ -1,0 +1,68 @@
+name: Verify packaged iOS 15 app
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Build run ID to verify
+        required: true
+        default: "38165267807"
+  push:
+    paths: [.github/workflows/verify-ios15-artifact.yml]
+  workflow_run:
+    workflows: [Build Husk iOS 15 IPA]
+    types: [completed]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  verify:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id || inputs.run_id || '38165267807' }}
+          pattern: Husk-iOS15-build-*
+          path: downloaded
+      - name: Inspect the actual IPA and TIPA archives
+        shell: python
+        run: |
+          import pathlib, plistlib, zipfile
+          packages = [p for p in pathlib.Path('downloaded').rglob('*') if p.suffix in ('.ipa', '.tipa')]
+          assert {p.suffix for p in packages} == {'.ipa', '.tipa'}, 'Both packages are required'
+          for package in packages:
+              with zipfile.ZipFile(package) as z:
+                  assert z.testzip() is None, 'Corrupt package ZIP'
+                  info_path = next(n for n in z.namelist() if n.startswith('Payload/') and n.endswith('.app/Info.plist'))
+                  root = info_path.removesuffix('Info.plist')
+                  info = plistlib.loads(z.read(info_path))
+                  version = tuple(int(v) for v in info['MinimumOSVersion'].split('.'))
+                  assert version <= (15, 6, 1), version
+                  for language in ('ru', 'en'):
+                      data = z.read(root + language + '.lproj/Localizable.strings')
+                      assert data, 'Empty localization catalog'
+                      try:
+                          values = plistlib.loads(data)
+                          if language == 'ru':
+                              assert values['Home'] == 'Главная'
+                              assert values['starting'] == 'запуск'
+                              assert len(values) >= 350
+                          print(package.name, language, len(values), 'localized entries')
+                      except plistlib.InvalidFileException:
+                          text = data.decode('utf-16' if data[:2] in (b'\xff\xfe', b'\xfe\xff') else 'utf-8-sig')
+                          if language == 'ru':
+                              assert 'Главная' in text and 'запуск' in text
+                              assert text.count(' = ') >= 350
+                          print(package.name, language, 'text catalog verified')
+                  for resource in ('java-runtime/husk-framework.dex',
+                                   'java-runtime/com.android.art/javalib/core-oj.jar',
+                                   'java-runtime/com.android.i18n/javalib/core-icu4j.jar',
+                                   'java-runtime/com.android.conscrypt/javalib/conscrypt.jar',
+                                   'java-runtime/org.apache.http.legacy.jar',
+                                   'java-runtime/framework-res.apk',
+                                   'java-runtime/com.android.tzdata/etc/tz/tzdata',
+                                   'android-system/etc/fonts.xml'):
+                      assert z.getinfo(root + resource).file_size > 0, resource
+                  print(package.name, 'PASS: iOS', info['MinimumOSVersion'], 'Russian UI and Android runtime present')

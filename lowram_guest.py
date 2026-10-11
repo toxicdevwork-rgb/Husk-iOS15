@@ -20,6 +20,14 @@ try:
     assert prop.is_file(), 'system/build.prop missing'
     script="from pathlib import Path\nimport json,sys\np=Path(sys.argv[1]); props=json.loads(sys.argv[2]); lines=p.read_text().splitlines()\nlines=[line for line in lines if line.split('=',1)[0] not in props]\np.write_text(chr(10).join(lines)+chr(10)+chr(10).join(k+'='+v for k,v in props.items())+chr(10))\n"
     run('sudo','python3','-c',script,prop,json.dumps(props))
+    # CI-only crash logger: this image is diagnostic and must never be shipped.
+    agent_rc=mount/'system/etc/init/husk-agent.rc'
+    debug_rc=mount/'system/etc/init/husk-lowram-debug.rc'
+    assert agent_rc.is_file()
+    print('GUEST_BRIDGE_INIT',agent_rc.read_text(),flush=True)
+    run('sudo','cp','--preserve=all',agent_rc,debug_rc)
+    logger="service husk_lowram_logcat /system/bin/logcat -b crash -v threadtime\n    class core\n    user shell\n    group shell log readproc\n    seclabel u:r:shell:s0\n    console\n    disabled\n\non post-fs-data\n    start husk_lowram_logcat\n"
+    run('sudo','python3','-c','from pathlib import Path; import sys; Path(sys.argv[1]).write_text(sys.argv[2])',debug_rc,logger)
     # Keep framework, networking, input, launcher, package manager and Husk bridge.
     # Only optional demo/decoration apps may be removed; log exactly what exists.
     removed=[]
@@ -95,11 +103,11 @@ def shell(command, timeout=30):
                 output.write(command+'\n'+data.decode(errors='replace')+'\n')
         control.close(); control=None
         raise
-report={'guest_mib':1024,'status':'failed','properties':props,'removed_optional_apps':removed}
+report={'guest_mib':1024,'status':'failed','diagnostic_only':True,'properties':props,'removed_optional_apps':removed}
 with (w/'qemu.log').open('w') as log:
     p=subprocess.Popen(cmd,stdout=log,stderr=log)
     try:
-        deadline=time.monotonic()+1200
+        deadline=time.monotonic()+600
         consecutive=0
         evidence=[]
         while time.monotonic()<deadline and p.poll() is None:
@@ -124,7 +132,7 @@ with (w/'qemu.log').open('w') as log:
                     print('CORE_SERVICES_OK',consecutive,flush=True)
                     (w/'backend-check.txt').write_text('\n'.join(evidence))
                     if consecutive >= 4:
-                        report['status']='booted-backend-services-present'
+                        report['status']='diagnostic-boot-only-do-not-publish'
                         report['stable_samples']=consecutive
                         break
                     time.sleep(45)
@@ -137,7 +145,7 @@ with (w/'qemu.log').open('w') as log:
             if serial.exists():
                 console=serial.read_text(errors='replace')
                 print('SERIAL_TAIL',console[-1600:],flush=True)
-                if 'Synchronous Exception' in console or 'Kernel panic' in console:
+                if 'Synchronous Exception' in console or 'Kernel panic' in console or "Restarting system with command 'RescueParty'" in console:
                     print('Guest firmware/kernel failure; aborting early',flush=True); break
             time.sleep(15)
     finally:
@@ -151,4 +159,4 @@ print(json.dumps(report),flush=True)
 for name in ('qemu.log','serial.log','backend-check.txt','partial-commands.txt'):
     file=w/name
     if file.exists(): print(name, file.read_text(errors='replace')[-12000:], flush=True)
-if report['status']=='failed': raise SystemExit('Low-RAM guest did not pass; do not ship it as working')
+raise SystemExit('Diagnostic-only guest; image publication is disabled')

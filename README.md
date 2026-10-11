@@ -1,5 +1,18 @@
 # Husk
 
+**Experimental iOS 15.6 backport.** This branch adapts upstream commit
+`6b59e21dbe6ac7013f237c149f995c231a05900b` for iPhone 12 mini / iOS 15.6.1.
+IPA and TIPA were built with Xcode 26.6 in
+[GitHub Actions](https://github.com/toxicdevwork-rgb/Husk-iOS15/actions/runs/38151341187).
+[Download the build artifact](https://github.com/toxicdevwork-rgb/Husk-iOS15/actions/runs/38151341187/artifacts/11706817512).
+All five bundled Mach-O files passed arm64/iOS <= 15.6.1 metadata checks.
+Installation, JIT and games still require testing on the device.
+The published fork stores changes in `husk-ios15.patch`; CI applies that patch
+to the pinned upstream commit before compiling. The source files shown in the
+fork are the upstream baseline, not the patched build checkout.
+See [port status and build instructions](docs/07-ios15-port.md).
+Built-in StikJIT and Live Activities are omitted from this distribution.
+
 <p align="center">
   <a href="https://trendshift.io/repositories/233057?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-233057" target="_blank" rel="noopener noreferrer">
     <img src="https://trendshift.io/api/badge/trendshift/repositories/233057/daily?language=Swift" alt="Leviidev/Husk | Trendshift" width="250" height="55"/>
@@ -97,7 +110,8 @@ SideStore, AltStore or TrollStore. It is one IPA for all of them: it carries
 Husk's entitlements, which TrollStore keeps, and a sideloader re-signs it with
 your own.
 
-Husk needs iOS 16.0 or later.
+Upstream requires iOS 16.0 or later. This experimental branch targets iOS 15.6;
+installation and execution on iOS 15.6.1 remain unverified.
 
 ## JIT
 

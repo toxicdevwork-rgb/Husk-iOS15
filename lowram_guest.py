@@ -2,7 +2,7 @@
 """CI experiment: low-RAM variant of the pinned Husk guest, booted with 1024 MiB.
 Does not publish or switch the app's default image until the guest passes its gates.
 """
-import hashlib, importlib.util, json, os, socket, struct, subprocess, time
+import bz2, hashlib, importlib.util, json, os, socket, struct, subprocess, tarfile, time
 from pathlib import Path
 spec=importlib.util.spec_from_file_location('resources', 'husk/scripts/prepare_android_runtime.py')
 r=importlib.util.module_from_spec(spec); spec.loader.exec_module(r)
@@ -55,12 +55,18 @@ with (w/'disk.raw').open('r+b') as f, (w/'system.img').open('rb') as system:
 run('qemu-img','convert','-c','-O','qcow2',w/'disk.raw',w/'vda-lowram.qcow2')
 run('qemu-img','create','-f','qcow2',w/'vdb.qcow2','16G')
 run('qemu-img','create','-f','qcow2',w/'vars.qcow2','64M')
-firmware=Path('/usr/share/AAVMF/AAVMF_CODE.fd'); assert firmware.exists()
+r.download('https://github.com/utmapp/qemu/releases/download/v10.0.12-utm/qemu-10.0.12-utm.tar.xz',w/'qemu.tar.xz','7c9605290b34152debb842e965a55d2e4fbba4793e536ab677b4027e5dc0ba1a')
+firmware=w/'edk2-aarch64-code.fd'
+with tarfile.open(w/'qemu.tar.xz') as archive:
+    member=next(m for m in archive.getmembers() if m.name.endswith('/pc-bios/edk2-aarch64-code.fd.bz2'))
+    firmware.write_bytes(bz2.decompress(archive.extractfile(member).read()))
+print('HUSK_FIRMWARE_SHA256',hashlib.sha256(firmware.read_bytes()).hexdigest(),flush=True)
 cmd=['qemu-system-aarch64','-M','virt,highmem=on','-cpu','max,pauth-impdef=on,sve=off','-smp','4','-m','1024','-accel','tcg,thread=multi,tb-size=128',
 '-drive',f'if=pflash,unit=0,format=raw,readonly=on,file={firmware}',
 '-drive',f'if=pflash,unit=1,format=qcow2,file={w}/vars.qcow2',
-'-drive',f'if=virtio,format=qcow2,file={w}/vda-lowram.qcow2',
-'-drive',f'if=virtio,format=qcow2,file={w}/vdb.qcow2',
+'-device','virtio-blk-pci,drive=vda,bootindex=0','-device','virtio-blk-pci,drive=vdb,bootindex=1',
+'-drive',f'if=none,id=vda,format=qcow2,file={w}/vda-lowram.qcow2',
+'-drive',f'if=none,id=vdb,format=qcow2,file={w}/vdb.qcow2',
 '-device','virtio-net-pci,netdev=net0','-netdev','user,id=net0,hostfwd=tcp:127.0.0.1:15599-:5599',
 '-device','virtio-gpu-pci,xres=360,yres=640','-device','qemu-xhci','-device','usb-tablet','-device','usb-kbd','-device','virtio-rng-pci',
 '-display','none','-monitor','none','-serial',f'file:{w}/serial.log']
@@ -87,6 +93,12 @@ with (w/'qemu.log').open('w') as log:
                     assert 'MemTotal:' in result and "Service package: found" in result and "Service activity: found" in result and "Service connectivity: found" in result
                     report['status']='booted-backend-services-present'; break
             except (OSError,AssertionError) as e: print('Waiting for guest:',str(e)[:100],flush=True)
+            serial=w/'serial.log'
+            if serial.exists():
+                console=serial.read_text(errors='replace')
+                print('SERIAL_TAIL',console[-1600:],flush=True)
+                if 'Synchronous Exception' in console or 'Kernel panic' in console:
+                    print('Guest firmware/kernel failure; aborting early',flush=True); break
             time.sleep(15)
     finally:
         p.terminate()
@@ -95,4 +107,7 @@ with (w/'qemu.log').open('w') as log:
         report['image_sha256']=hashlib.file_digest((w/'vda-lowram.qcow2').open('rb'),'sha256').hexdigest()
         (w/'result.json').write_text(json.dumps(report,indent=2))
 print(json.dumps(report),flush=True)
+for name in ('qemu.log','serial.log','backend-check.txt'):
+    file=w/name
+    if file.exists(): print(name, file.read_text(errors='replace')[-12000:], flush=True)
 if report['status']=='failed': raise SystemExit('Low-RAM guest did not pass; do not ship it as working')

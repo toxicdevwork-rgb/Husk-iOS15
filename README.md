@@ -3,21 +3,24 @@
 **Experimental iOS 15.6 backport with Russian UI.** Targets iPhone 12 mini,
 iOS 15.6.1 and Dopamine/TrollStore, based on upstream `6b59e21dbe6ac7013f237c149f995c231a05900b`.
 
-[Build 8 — successful GitHub Actions build](https://github.com/toxicdevwork-rgb/Husk-iOS15/actions/runs/38165267807)
-· [Download IPA / TIPA](https://github.com/toxicdevwork-rgb/Husk-iOS15/actions/runs/38165267807/artifacts/11712386304).
+[Build 11 — successful GitHub Actions build](https://github.com/toxicdevwork-rgb/Husk-iOS15/actions/runs/38170540191)
+· [Download IPA / TIPA](https://github.com/toxicdevwork-rgb/Husk-iOS15/actions/runs/38170540191/artifacts/11713428152).
 For TrollStore, use `Husk-iOS15.tipa` from the artifact ZIP.
 
-This update includes the previously missing Java/Android runtime resources,
-358 Russian interface entries with an English switch, shared-JIT ownership checks,
-and Android boot diagnostics. The build validates both binary compatibility and
-runtime resources before packaging. An additional workflow inspects the published archives.
+Build 11 fixes resource URI construction and bitmap reuse used by Discord/Fresco,
+and makes the Russian toolbar and error controls fit narrow screens. Java API
+regression tests, iOS 15 binary/resource checks and archive verification passed.
+[Package verification](https://github.com/toxicdevwork-rgb/Husk-iOS15/actions/runs/38171386423).
 
-The previous build opened on the device and passed the JIT self-test, but Discord
-failed on missing Java resources and Android did not complete booting. **Discord
-compatibility and Android boot after these fixes still require device testing.**
+Build 8 reached Discord's interface on the device. Build 11 still needs a device
+retest for chats and rendering. **Long-running Java translation can exhaust memory:
+the upstream DVM has no tracing garbage collector.** Reducing VM RAM does not fix it.
 Disable Android autostart and restart Husk before testing Translation Layer.
-For Android on the 12 mini, select CPU rendering and leave at least 3 GB free for
-the RAM file. Switching runtimes requires restarting Husk because they share JIT memory.
+
+A separate CI experiment builds a low-RAM Android guest and tests a cold boot at
+1024 MiB. It has not been approved as the app's default guest. The original Android
+profile still requires storage for its RAM file; total Husk memory also includes
+QEMU, JIT and rendering. Switching runtimes requires restarting Husk.
 
 The fork stores changes in `husk-ios15.patch`; CI applies it to the pinned upstream
 commit. The source tree shown on GitHub is the upstream baseline.

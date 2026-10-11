@@ -1,9 +1,9 @@
 diff --git a/.github/workflows/build-ios15.yml b/.github/workflows/build-ios15.yml
 new file mode 100644
-index 0000000..f81afa3
+index 0000000..e6d66ac
 --- /dev/null
 +++ b/.github/workflows/build-ios15.yml
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,38 @@
 +name: Build Husk for iOS 15.6
 +on:
 +  workflow_dispatch:
@@ -21,6 +21,9 @@ index 0000000..f81afa3
 +      - name: Install build tools
 +        run: |
 +          brew install meson ninja pkg-config xcodegen qemu
++          python3 -m venv /tmp/husk-build-python
++          /tmp/husk-build-python/bin/python -m pip install 'PyYAML==6.0.3' 'Mako==1.3.10'
++          echo /tmp/husk-build-python/bin >> "$GITHUB_PATH"
 +          rustup target add aarch64-apple-ios
 +          xcodebuild -version
 +          xcrun --sdk iphoneos --show-sdk-version
@@ -77,10 +80,10 @@ index 66c6d9b..024b3c7 100644
  
 diff --git a/docs/07-ios15-port.md b/docs/07-ios15-port.md
 new file mode 100644
-index 0000000..bbbb1f2
+index 0000000..7d8bfe9
 --- /dev/null
 +++ b/docs/07-ios15-port.md
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,98 @@
 +# Порт Husk на iOS 15.6.1: состояние
 +
 +Цель: iPhone 12 mini, A14, iOS 15.6.1, Dopamine/TrollStore.
@@ -89,8 +92,10 @@ index 0000000..bbbb1f2
 +
 +**Это подготовленный исходный порт, а не проверенный IPA.** На доступном Windows-хосте
 +нет Xcode и подключённого iPhone. Компиляция Swift/Objective-C, линковка зависимостей,
-+установка, JIT и запуск Android-приложений пока не проверены. GitHub workflow создан
-+локально, но не опубликован и не запускался.
++установка, JIT и запуск Android-приложений пока не проверены. Сборка запущена в
++[GitHub Actions](https://github.com/toxicdevwork-rgb/Husk-iOS15/actions/workflows/build-ios15-port.yml).
++Первый запуск собрал ANGLE и libepoxy; отсутствие PyYAML для virglrenderer исправлено
++в окружении CI. Окончательный результат компиляции пока ожидается.
 +
 +## Что показала проверка исходников
 +
@@ -127,13 +132,18 @@ index 0000000..bbbb1f2
 +   приложения отключён условием `HUSK_IOS15`. Автоматический JIT предпочитает Dopamine,
 +   затем доступный StikDebug на новых системах, иначе предлагает TrollStore.
 +4. ANGLE закреплён на WebKit `132c1a571cbe2549aff28a963c0c2502d50ebb92`.
-+   Это фиксация исходников, а не подтверждение успешной сборки этой ревизии.
++   Эта ревизия успешно собрана с target 15.6 на GitHub runner (Xcode 26.6).
++   Работа графики на iPhone ещё не проверена.
 +5. Упаковка требует генерации проекта и проверки каждого Mach-O в `.app`: generic arm64,
 +   iOS device platform, minOS <= 15.6.1, отсутствие новых расширений и известных
 +   недоступных strong-linked frameworks. Проверка не доказывает доступность всех
 +   импортируемых символов и не заменяет запуск.
 +
-+## Сборка на Mac
++## Сборка через GitHub Actions
++
++Личный Mac не нужен: workflow использует macOS runner GitHub. В форке хранится
++воспроизводимый патч `husk-ios15.patch`, который применяется к закреплённому
++upstream-коммиту в отдельном checkout. Ниже также приведены команды для Mac.
 +
 +Нужен современный Xcode с SDK, содержащим используемые upstream API iOS 26;
 +Xcode 13 и SDK iOS 15 не подходят. Deployment target и версия SDK — разные параметры.
@@ -142,6 +152,9 @@ index 0000000..bbbb1f2
 +
 +```sh
 +brew install meson ninja pkg-config xcodegen qemu
++python3 -m venv .build-python
++source .build-python/bin/activate
++python -m pip install 'PyYAML==6.0.3' 'Mako==1.3.10'
 +rustup target add aarch64-apple-ios
 +python3 -m unittest discover -s tests -p 'test_ios15_*.py' -v
 +SDKMINVER=15.6 DD=/tmp/husk_ios15 ./scripts/ci_build.sh "$PWD/build/Husk-iOS15.ipa"
@@ -149,7 +162,9 @@ index 0000000..bbbb1f2
 +
 +Либо вручную запустить `.github/workflows/build-ios15.yml` после публикации ветки
 +в собственном GitHub-репозитории. Workflow сохраняет IPA/TIPA и логи даже при ошибке.
-+Он намеренно не использует кеш чужой сборки. Подпись ad hoc и различие IPA/TIPA
++Опубликованный workflow кэширует собственные зависимости отдельно по архитектуре
++runner. При изменении target/версий зависимостей надо изменить версию ключа кэша.
++Подпись ad hoc и различие IPA/TIPA
 +унаследованы от upstream; entitlements не удалялись только из-за возраста iOS.
 +
 +`ci_build.sh` upstream не создаёт опциональные ресурсы `android-system` и `java-runtime`:
@@ -341,10 +356,10 @@ index d2e4bb0..38cfe29 100755
  cargo build --release --locked --target "$TARGET"
 diff --git a/scripts/macho_reader.py b/scripts/macho_reader.py
 new file mode 100644
-index 0000000..c2214bc
+index 0000000..44a8b81
 --- /dev/null
 +++ b/scripts/macho_reader.py
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,122 @@
 +"""Bounds-checked Mach-O load command reader (Python standard library only)."""
 +import struct
 +
@@ -467,7 +482,6 @@ index 0000000..c2214bc
 +    if offset != commands_end:
 +        raise ValueError("Load command size/count mismatch")
 +    return [result]
-+
 diff --git a/scripts/package_ipa.sh b/scripts/package_ipa.sh
 index 2ec1376..11a6b1e 100755
 --- a/scripts/package_ipa.sh
@@ -705,7 +719,7 @@ index ce251c5..083943b 100644
                                  .frame(maxWidth: .infinity).padding(.vertical, 6)
                          }
 diff --git a/src/app/Husk/DiscoverTab.swift b/src/app/Husk/DiscoverTab.swift
-index 4a70482..3c71ca0 100644
+index 4a70482..0bf37b9 100644
 --- a/src/app/Husk/DiscoverTab.swift
 +++ b/src/app/Husk/DiscoverTab.swift
 @@ -1,5 +1,6 @@
@@ -751,6 +765,15 @@ index 4a70482..3c71ca0 100644
                      Button("Add") {
                          let url = newSourceURL
                          newSourceURL = ""
+@@ -215,7 +216,7 @@ struct DiscoverView: View {
+                         Task { await manager.addSource(urlString: url) }
+                     }
+                     .disabled(newSourceURL.isEmpty)
+-                    .bold()
++                    .font(.body.weight(.bold))
+                 }
+             }
+         }
 @@ -224,7 +225,7 @@ struct DiscoverView: View {
      // MARK: - Manage Sources Sheet
  
@@ -928,12 +951,19 @@ index 033fd28..941f9a7 100644
              while let v = vc { v.setNeedsUpdateOfSupportedInterfaceOrientations(); vc = v.presentedViewController }
 diff --git a/src/app/Husk/IOS15Compatibility.swift b/src/app/Husk/IOS15Compatibility.swift
 new file mode 100644
-index 0000000..a2bc37a
+index 0000000..cc146ab
 --- /dev/null
 +++ b/src/app/Husk/IOS15Compatibility.swift
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,136 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +import SwiftUI
++
++extension Color {
++    var huskGradient: LinearGradient {
++        LinearGradient(colors: [opacity(0.75), self],
++                       startPoint: .top, endPoint: .bottom)
++    }
++}
 +
 +/// The label/value rows used by Husk, without requiring iOS 16 LabeledContent.
 +struct HuskLabeledContent<Label: View, Content: View>: View {
@@ -1238,7 +1268,7 @@ index 053c8af..363158b 100644
                      detail: JITBootstrap.isTrollStoreInstalled ? "TrollStore is installed."
                          : "For a Husk installed through TrollStore.",
 diff --git a/src/app/Husk/Launcher.swift b/src/app/Husk/Launcher.swift
-index e800074..cf31732 100644
+index e800074..9e271c6 100644
 --- a/src/app/Husk/Launcher.swift
 +++ b/src/app/Husk/Launcher.swift
 @@ -1,5 +1,6 @@
@@ -1305,6 +1335,15 @@ index e800074..cf31732 100644
                      HStack(spacing: 12) {
                          TileGlyph(systemImage: "apps.iphone", color: AndroidMark.green, size: 40)
                          VStack(alignment: .leading, spacing: 2) {
+@@ -535,7 +536,7 @@ struct AndroidMark: View {
+             .font(.system(size: size * 0.46, weight: .semibold))
+             .foregroundStyle(.white)
+             .frame(width: size, height: size)
+-            .background(Self.green.gradient, in: RoundedRectangle(cornerRadius: size * 0.225, style: .continuous))
++            .background(Self.green.huskGradient, in: RoundedRectangle(cornerRadius: size * 0.225, style: .continuous))
+     }
+ }
+ 
 @@ -562,7 +563,7 @@ struct LibraryScreen: View {
      @State private var query = ""
  
@@ -1396,6 +1435,19 @@ index 4dd8f8e..5e285e5 100644
              ZStack {
                  Theme.backdrop.ignoresSafeArea()
  
+diff --git a/src/app/Husk/Play/PlayDevice.swift b/src/app/Husk/Play/PlayDevice.swift
+index d2e4ac4..df4207d 100644
+--- a/src/app/Husk/Play/PlayDevice.swift
++++ b/src/app/Husk/Play/PlayDevice.swift
+@@ -37,7 +37,7 @@ enum PlayDevice {
+         let id = Locale.current.identifier.replacingOccurrences(of: "-", with: "_")
+         return id.contains("_") ? id : "en_US"
+     }
+-    static var country: String { (Locale.current.region?.identifier ?? "US").lowercased() }
++    static var country: String { (Locale.current.regionCode ?? "US").lowercased() }
+ 
+     static let sharedLibraries = [
+         "android.ext.shared", "android.hidl.base-V1.0-java", "android.hidl.manager-V1.0-java", "android.net.ipsec.ike",
 diff --git a/src/app/Husk/Play/StoreView.swift b/src/app/Husk/Play/StoreView.swift
 index 9a80693..95445f3 100644
 --- a/src/app/Husk/Play/StoreView.swift
@@ -1460,7 +1512,7 @@ index 0000000..27c7225
 +OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 +THE SOFTWARE.
 diff --git a/src/app/Husk/SettingsTab.swift b/src/app/Husk/SettingsTab.swift
-index 5240506..2c86340 100644
+index 5240506..8acc642 100644
 --- a/src/app/Husk/SettingsTab.swift
 +++ b/src/app/Husk/SettingsTab.swift
 @@ -1,5 +1,6 @@
@@ -1479,6 +1531,24 @@ index 5240506..2c86340 100644
              List {
                  Section {
                      NavigationLink { AboutSettings() } label: { appCard }
+@@ -37,7 +38,7 @@ struct SettingsTab: View {
+                             }
+                         } icon: {
+                             RoundedRectangle(cornerRadius: 7, style: .continuous)
+-                                .fill(Color.purple.gradient)
++                                .fill(Color.purple.huskGradient)
+                                 .frame(width: 30, height: 30)
+                                 .overlay {
+                                     Image(systemName: "macwindow.on.rectangle")
+@@ -87,7 +88,7 @@ struct SettingsTab: View {
+                 }
+             } icon: {
+                 RoundedRectangle(cornerRadius: 7, style: .continuous)
+-                    .fill(tint.gradient)
++                    .fill(tint.huskGradient)
+                     .frame(width: 30, height: 30)
+                     .overlay {
+                         Image(systemName: icon)
 @@ -787,9 +788,9 @@ struct AboutSettings: View {
              }
  
@@ -1580,6 +1650,19 @@ index 3e1b844..262062e 100644
                      Text(showLog ? "Hide log" : "Log").font(.system(size: 12, weight: .semibold))
                  }
                  .tint(.white)
+diff --git a/src/app/Husk/WebApp.swift b/src/app/Husk/WebApp.swift
+index 910b1a8..60e3c13 100644
+--- a/src/app/Husk/WebApp.swift
++++ b/src/app/Husk/WebApp.swift
+@@ -230,7 +230,7 @@ final class WebAppRuntime: NSObject {
+         case ("Device", "getBatteryInfo"):
+             ok(["batteryLevel": Self.batteryLevel, "isCharging": false])
+         case ("Device", "getLanguageCode"):
+-            ok(["value": Locale.current.language.languageCode?.identifier ?? "en"])
++            ok(["value": Locale.current.languageCode ?? "en"])
+         case ("Device", "getLanguageTag"):
+             ok(["value": Locale.preferredLanguages.first ?? "en-US"])
+         case ("StatusBar", "setBackgroundColor"):
 diff --git a/src/app/project.yml b/src/app/project.yml
 index 97bc417..480e5ce 100644
 --- a/src/app/project.yml

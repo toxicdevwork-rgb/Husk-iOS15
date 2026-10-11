@@ -9,10 +9,10 @@ permissions:
   contents: read
 concurrency:
   group: husk-ios15-build
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-26-intel
     timeout-minutes: 360
     env:
       SDKMINVER: "15.6"
@@ -57,7 +57,15 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p build/logs
-          ./scripts/ci_build.sh "$PWD/build/Husk-iOS15.ipa" 2>&1 | tee build/logs/ci.log
+          if ! ./scripts/ci_build.sh "$PWD/build/Husk-iOS15.ipa" 2>&1 | tee build/logs/ci.log; then
+            for log in build/logs/*.log /tmp/husk_ios15/build.log; do
+              [ -f "$log" ] || continue
+              echo "::group::$log"
+              tail -n 80 "$log"
+              echo "::endgroup::"
+            done
+            exit 1
+          fi
           shasum -a 256 build/*.ipa build/*.tipa > build/SHA256SUMS.txt
       - name: Preserve packages and diagnostics
         if: always()

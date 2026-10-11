@@ -1,0 +1,1811 @@
+diff --git a/.github/workflows/build-ios15.yml b/.github/workflows/build-ios15.yml
+new file mode 100644
+index 0000000..f81afa3
+--- /dev/null
++++ b/.github/workflows/build-ios15.yml
+@@ -0,0 +1,35 @@
++name: Build Husk for iOS 15.6
++on:
++  workflow_dispatch:
++permissions:
++  contents: read
++jobs:
++  build:
++    runs-on: macos-latest
++    timeout-minutes: 360
++    env:
++      SDKMINVER: "15.6"
++      DD: /tmp/husk_ios15
++    steps:
++      - uses: actions/checkout@v4
++      - name: Install build tools
++        run: |
++          brew install meson ninja pkg-config xcodegen qemu
++          rustup target add aarch64-apple-ios
++          xcodebuild -version
++          xcrun --sdk iphoneos --show-sdk-version
++      - name: Test bundle compatibility gate
++        run: python3 -m unittest discover -s tests -p 'test_ios15_*.py' -v
++      - name: Build dependencies and packages from source
++        run: ./scripts/ci_build.sh "$PWD/build/Husk-iOS15.ipa"
++      - name: Preserve packages and build diagnostics
++        if: always()
++        uses: actions/upload-artifact@v4
++        with:
++          name: Husk-iOS15-build
++          if-no-files-found: warn
++          path: |
++            build/*.ipa
++            build/*.tipa
++            build/logs/
++            /tmp/husk_ios15/build.log
+diff --git a/.gitignore b/.gitignore
+index 73eed07..9c2d821 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -22,3 +22,5 @@ third_party/gpu/
+ .build/
+ *.ipa
+ .freebuff/
++__pycache__/
++*.pyc
+diff --git a/README.md b/README.md
+index 66c6d9b..024b3c7 100644
+--- a/README.md
++++ b/README.md
+@@ -1,5 +1,11 @@
+ # Husk
+ 
++**Experimental iOS 15.6 backport.** This branch adapts upstream commit
++`6b59e21dbe6ac7013f237c149f995c231a05900b` for iPhone 12 mini / iOS 15.6.1.
++Source changes and local validation are prepared; no successful Xcode build or
++device test has been performed. See [port status and build instructions](docs/07-ios15-port.md).
++Built-in StikJIT and Live Activities are omitted from this distribution.
++
+ <p align="center">
+   <a href="https://trendshift.io/repositories/233057?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-233057" target="_blank" rel="noopener noreferrer">
+     <img src="https://trendshift.io/api/badge/trendshift/repositories/233057/daily?language=Swift" alt="Leviidev/Husk | Trendshift" width="250" height="55"/>
+@@ -97,7 +103,8 @@ SideStore, AltStore or TrollStore. It is one IPA for all of them: it carries
+ Husk's entitlements, which TrollStore keeps, and a sideloader re-signs it with
+ your own.
+ 
+-Husk needs iOS 16.0 or later.
++Upstream requires iOS 16.0 or later. This experimental branch targets iOS 15.6;
++installation and execution on iOS 15.6.1 remain unverified.
+ 
+ ## JIT
+ 
+diff --git a/docs/07-ios15-port.md b/docs/07-ios15-port.md
+new file mode 100644
+index 0000000..bbbb1f2
+--- /dev/null
++++ b/docs/07-ios15-port.md
+@@ -0,0 +1,86 @@
++# Порт Husk на iOS 15.6.1: состояние
++
++Цель: iPhone 12 mini, A14, iOS 15.6.1, Dopamine/TrollStore.
++Основа: [Leviidev/Husk, 6b59e21](https://github.com/Leviidev/Husk/tree/6b59e21dbe6ac7013f237c149f995c231a05900b).
++Локальная ветка: `codex/ios15-backport`.
++
++**Это подготовленный исходный порт, а не проверенный IPA.** На доступном Windows-хосте
++нет Xcode и подключённого iPhone. Компиляция Swift/Objective-C, линковка зависимостей,
++установка, JIT и запуск Android-приложений пока не проверены. GitHub workflow создан
++локально, но не опубликован и не запускался.
++
++## Что показала проверка исходников
++
++- В текущем upstream нет `scripts/build_dependencies.sh` и workflow `build-ipa.yml`.
++  Входная точка — `scripts/ci_build.sh`, QEMU собирает `scripts/build_ios.sh`.
++- QEMU, ANGLE и Rust-библиотека pairing уже имели minOS 15.5. В этой ветке первые
++  три скрипта по умолчанию используют 15.6. MoltenVK v1.4.2 в своём
++  [проекте](https://github.com/KhronosGroup/MoltenVK/blob/v1.4.2/MoltenVK/MoltenVK.xcodeproj/project.pbxproj)
++  задаёт minOS 15.0; понижать его не требуется. Реальный результат проверяется по Mach-O.
++- В `src/ios-jit/husk-ios-jit.c` уже есть самостоятельное выделение исполняемой памяти
++  и тест исполнения для систем до iOS 26: MAP_JIT и отдельный путь для debugged/jailbroken
++  процесса. APRR и разделение RW/RX сохранены. Их работоспособность на A14 надо проверить
++  на устройстве; замена на один `mprotect` сама по себе не выдаёт разрешение на JIT.
++- [StikDebug](https://github.com/StikDebug/StikDebug) требует iOS 17.4+.
++  Новый JavaScript не сделает его приложением для iOS 15. Скрипт `universal-ios15.js`
++  не добавлялся. `get-task-allow` не заменяет предоставление JIT системой.
++- ANGLE предоставляет EGL/OpenGL ES. MoltenVK предоставляет Vulkan поверх Metal,
++  поэтому он не заменяет ANGLE для GLES-приложений и virglrenderer.
++- У поставляемого `libFilePickerFix.dylib` arm64/minOS 15.0. У StikJIT.framework
++  minOS 17.4; helper-расширение имеет target 26.0, widget — 16.1.
++
++## Изменения
++
++1. XcodeGen target 15.6; NavigationBackport 0.11.5 закреплён по commit SHA.
++   Сохраняются массивы путей, переходы из уведомлений приложения и вложенные страницы.
++   MIT-лицензия зависимости включена в ресурсы приложения.
++2. `LabeledContent` и отправка файлов через `ShareLink` заменены совместимыми компонентами.
++   Современные sheet/scroll/gesture API и анимации имеют проверки доступности.
++   На iOS 15 используются обычные sheets и spring-анимации; скрытие home indicator
++   и отсрочка системных жестов через эти SwiftUI-модификаторы там не применяются.
++   Поворот экрана использует `attemptRotationToDeviceOrientation`; принудительный
++   поворот и возвращение из игры требуют отдельного теста на телефоне.
++3. Из target graph исключены StikJIT/helper и Live Activity widget; ActivityKit-код
++   приложения отключён условием `HUSK_IOS15`. Автоматический JIT предпочитает Dopamine,
++   затем доступный StikDebug на новых системах, иначе предлагает TrollStore.
++4. ANGLE закреплён на WebKit `132c1a571cbe2549aff28a963c0c2502d50ebb92`.
++   Это фиксация исходников, а не подтверждение успешной сборки этой ревизии.
++5. Упаковка требует генерации проекта и проверки каждого Mach-O в `.app`: generic arm64,
++   iOS device platform, minOS <= 15.6.1, отсутствие новых расширений и известных
++   недоступных strong-linked frameworks. Проверка не доказывает доступность всех
++   импортируемых символов и не заменяет запуск.
++
++## Сборка на Mac
++
++Нужен современный Xcode с SDK, содержащим используемые upstream API iOS 26;
++Xcode 13 и SDK iOS 15 не подходят. Deployment target и версия SDK — разные параметры.
++Использовать чистый checkout без старых `build/`, `third_party/` и DerivedData:
++скрипты upstream пропускают уже собранные зависимости по наличию файлов/stamps.
++
++```sh
++brew install meson ninja pkg-config xcodegen qemu
++rustup target add aarch64-apple-ios
++python3 -m unittest discover -s tests -p 'test_ios15_*.py' -v
++SDKMINVER=15.6 DD=/tmp/husk_ios15 ./scripts/ci_build.sh "$PWD/build/Husk-iOS15.ipa"
++```
++
++Либо вручную запустить `.github/workflows/build-ios15.yml` после публикации ветки
++в собственном GitHub-репозитории. Workflow сохраняет IPA/TIPA и логи даже при ошибке.
++Он намеренно не использует кеш чужой сборки. Подпись ad hoc и различие IPA/TIPA
++унаследованы от upstream; entitlements не удалялись только из-за возраста iOS.
++
++`ci_build.sh` upstream не создаёт опциональные ресурсы `android-system` и `java-runtime`:
++для приложений, которым нужны эти ресурсы, требуются соответствующие build-скрипты.
++Это ограничение не устранено данным портом.
++
++## Что проверено и что осталось
++
++Локально прошли 9 тестов проверки пакета, разбор YAML/plist, синтаксис изменённых
++shell-скриптов и `git diff --check`. Отдельно прочитаны заголовки двух поставляемых
++Mach-O. SwiftUI и ARM64-код здесь не выполнялись.
++
++Следующий обязательный шаг — реальная сборка на macOS, затем iPhone:
++первый запуск и навигация Home/Library/Files/JIT, назад/вперёд и программный переход,
++импорт APK, экспорт отчёта, поворот игры, JIT self-test с фактическим исполнением кода,
++запуск одного ARM64 GLES-приложения, Vulkan-приложения и отдельно QEMU-гостя.
++Записать логи JIT, dyld, Metal и jetsam. До этого совместимость не подтверждена.
+diff --git a/scripts/audit_ios15_bundle.py b/scripts/audit_ios15_bundle.py
+new file mode 100644
+index 0000000..42f842e
+--- /dev/null
++++ b/scripts/audit_ios15_bundle.py
+@@ -0,0 +1,83 @@
++#!/usr/bin/env python3
++"""Reject an iOS 15 bundle with incompatible embedded code. Not a runtime test."""
++import argparse
++import plistlib
++from pathlib import Path
++
++from macho_reader import FAT, THIN, os_tuple, parse_macho
++
++
++def audit(app: Path, target: str = "15.6.1") -> list[str]:
++    errors = []
++    limit = os_tuple(target)
++    executable = None
++    try:
++        info = plistlib.loads((app / "Info.plist").read_bytes())
++        executable = app / info["CFBundleExecutable"]
++        if not executable.is_file():
++            errors.append("main executable missing")
++        if os_tuple(info["MinimumOSVersion"]) > limit:
++            errors.append("app MinimumOSVersion exceeds target")
++    except (OSError, ValueError, KeyError, TypeError) as e:
++        errors.append(f"invalid app Info.plist: {e}")
++
++    # The dedicated iOS 15 variant must not accidentally ship stale extensions
++    # or StikJIT from an earlier build in the same DerivedData directory.
++    for name in ("PlugIns/HuskJITHelper.appex", "PlugIns/HuskDownloadsWidget.appex",
++                 "Frameworks/StikJIT.framework"):
++        if (app / name).exists():
++            errors.append(f"unsupported component: {name}")
++
++    binaries = set()
++    for path in sorted(app.rglob("*")):
++        if not path.is_file():
++            continue
++        relative = path.relative_to(app)
++        if path.name == "Info.plist" and path.parent != app:
++            try:
++                info = plistlib.loads(path.read_bytes())
++                if "MinimumOSVersion" in info and os_tuple(info["MinimumOSVersion"]) > limit:
++                    errors.append(f"{relative}: MinimumOSVersion exceeds target")
++            except (ValueError, TypeError, plistlib.InvalidFileException) as e:
++                errors.append(f"{relative}: invalid plist: {e}")
++        with path.open("rb") as stream:
++            magic = stream.read(4)
++        if magic not in THIN and magic not in FAT:
++            continue
++        binaries.add(path)
++        try:
++            slices = parse_macho(path.read_bytes())
++            arm64 = [s for s in slices if s["cpu_type"] == 0x100000C
++                     and s["cpu_subtype"] & 0xFFFFFF == 0]
++            if not arm64:
++                errors.append(f"{relative}: no generic arm64 slice")
++            for binary in arm64:
++                versions = binary["build_versions"]
++                if not versions:
++                    errors.append(f"{relative}: missing deployment version")
++                for version in versions:
++                    if version["platform"] != 2 or os_tuple(version["minimum_os"]) > limit:
++                        errors.append(f"{relative}: incompatible platform/minOS {version}")
++                for library in binary["libraries"]:
++                    if library["linkage"] != "weak" and any(
++                        f"/{name}.framework/" in library["path"]
++                        for name in ("ActivityKit", "ExtensionFoundation", "ExtensionKit", "CoreTransferable")
++                    ):
++                        errors.append(f"{relative}: strong link to newer framework {library['path']}")
++        except (ValueError, IndexError) as e:
++            errors.append(f"{relative}: malformed Mach-O: {e}")
++    if executable not in binaries:
++        errors.append("main executable is not Mach-O")
++    if not errors:
++        print(f"PASS: {len(binaries)} Mach-O files satisfy arm64/iOS <= {target} metadata checks")
++    return errors
++
++
++if __name__ == "__main__":
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("app", type=Path)
++    args = parser.parse_args()
++    problems = audit(args.app)
++    for problem in problems:
++        print(f"FAIL: {problem}")
++    raise SystemExit(bool(problems))
+diff --git a/scripts/build_angle_ios.sh b/scripts/build_angle_ios.sh
+index 4e337b7..4f05336 100755
+--- a/scripts/build_angle_ios.sh
++++ b/scripts/build_angle_ios.sh
+@@ -15,6 +15,8 @@ set -euo pipefail
+ HUSK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ GPU="$HUSK_ROOT/third_party/gpu"
+ WK="$GPU/webkit"
++# Pin the source used by this backport instead of following WebKit's moving HEAD.
++WEBKIT_REV=132c1a571cbe2549aff28a963c0c2502d50ebb92
+ PREFIX="$HUSK_ROOT/build/ios-arm64/sysroot"
+ LOG="$HUSK_ROOT/build/logs/angle-build.log"
+ mkdir -p "$GPU" "$(dirname "$LOG")"
+@@ -24,6 +26,10 @@ if [ ! -d "$WK" ]; then
+     git clone --depth 1 --filter=blob:none --sparse \
+         https://github.com/WebKit/WebKit.git "$WK"
+ fi
++if [ "$(git -C "$WK" rev-parse HEAD)" != "$WEBKIT_REV" ]; then
++    git -C "$WK" fetch --depth 1 origin "$WEBKIT_REV"
++    git -C "$WK" checkout --detach "$WEBKIT_REV"
++fi
+ 
+ # Configurations and Tools/ccache are not optional: the ANGLE xcconfigs include
+ # ../../../../Tools/ccache/ccache.xcconfig, and the build fails to even start
+@@ -42,7 +48,7 @@ cd "$WK/Source/ThirdParty/ANGLE"
+ # hiding, all of the form "MTLPixelFormatBC1_RGBA is only available on iOS
+ # 16.4". Those are enum constants, harmless to compile in; the one call that
+ # matters, supportsBCTextureCompression, sits behind @available, so the warning
+-# is turned off rather than the target raised. Husk deploys to 15.5 (TrollStore
++# is turned off rather than the target raised. Husk deploys to 15.6 (TrollStore
+ # and Dopamine devices), and ANGLE is built to match.
+ ALIASES="$GPU/angle-aliases.txt"
+ 
+@@ -66,7 +72,7 @@ angle_build () {
+         WEBCORE_LIBRARY_DIR="/usr/local/lib" NORMAL_UMBRELLA_FRAMEWORKS_DIR="" \
+         CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+         WK_AVAILABILITY_OVERLAY_FLAGS="" WK_AVAILABILITY_OVERLAY_SWIFT_FLAGS="" \
+-        IPHONEOS_DEPLOYMENT_TARGET="15.5" \
++        IPHONEOS_DEPLOYMENT_TARGET="${SDKMINVER:-15.6}" \
+         OTHER_CFLAGS='$(inherited) -Wno-unguarded-availability-new' \
+         OTHER_CPLUSPLUSFLAGS='$(inherited) -Wno-unguarded-availability-new' \
+         ${ldflags[@]+"${ldflags[@]}"} \
+diff --git a/scripts/build_gpu_ios.sh b/scripts/build_gpu_ios.sh
+index f8d2c65..bf67e6e 100755
+--- a/scripts/build_gpu_ios.sh
++++ b/scripts/build_gpu_ios.sh
+@@ -18,8 +18,8 @@ HUSK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ GPU="$HUSK_ROOT/third_party/gpu"
+ PREFIX="$HUSK_ROOT/build/ios-arm64/sysroot"
+ LOGS="$HUSK_ROOT/build/logs"
+-MESON=/opt/homebrew/bin/meson
+-NINJA=/opt/homebrew/bin/ninja
++MESON="$(command -v meson)"
++NINJA="$(command -v ninja)"
+ mkdir -p "$GPU" "$LOGS"
+ 
+ EPOXY_COMMIT=bf98587477fe68d07b93319ece7b40a7d0e2eabe
+diff --git a/scripts/build_ios.sh b/scripts/build_ios.sh
+index 22a6ff9..c78fd2e 100755
+--- a/scripts/build_ios.sh
++++ b/scripts/build_ios.sh
+@@ -19,7 +19,7 @@ mkdir -p "$PREFIX" "$LOGS" "$STAMPS"
+ 
+ ARCH=arm64
+ SDK=iphoneos
+-SDKMINVER="${SDKMINVER:-15.5}"
++SDKMINVER="${SDKMINVER:-15.6}"
+ NCPU="$(sysctl -n hw.ncpu)"
+ 
+ SDKROOT="$(xcrun --sdk $SDK --show-sdk-path)"
+diff --git a/scripts/build_rppairing_ios.sh b/scripts/build_rppairing_ios.sh
+index d2e4bb0..38cfe29 100755
+--- a/scripts/build_rppairing_ios.sh
++++ b/scripts/build_rppairing_ios.sh
+@@ -16,7 +16,7 @@ CRATE="$HUSK_ROOT/src/rppairing-ios"
+ OUT="$HUSK_ROOT/build/ios-arm64/lib"
+ TARGET=aarch64-apple-ios
+ # Match the app's deployment target, or the linker warns on every object.
+-export IPHONEOS_DEPLOYMENT_TARGET=15.5
++export IPHONEOS_DEPLOYMENT_TARGET="${SDKMINVER:-15.6}"
+ 
+ cd "$CRATE"
+ cargo build --release --locked --target "$TARGET"
+diff --git a/scripts/macho_reader.py b/scripts/macho_reader.py
+new file mode 100644
+index 0000000..c2214bc
+--- /dev/null
++++ b/scripts/macho_reader.py
+@@ -0,0 +1,123 @@
++"""Bounds-checked Mach-O load command reader (Python standard library only)."""
++import struct
++
++THIN = {
++    b"\xcf\xfa\xed\xfe": ("<", True),
++    b"\xfe\xed\xfa\xcf": (">", True),
++    b"\xce\xfa\xed\xfe": ("<", False),
++    b"\xfe\xed\xfa\xce": (">", False),
++}
++FAT = {
++    b"\xca\xfe\xba\xbe": (">", False),
++    b"\xbe\xba\xfe\xca": ("<", False),
++    b"\xca\xfe\xba\xbf": (">", True),
++    b"\xbf\xba\xfe\xca": ("<", True),
++}
++DYLIB_COMMANDS = {0xC: "required", 0x80000018: "weak", 0x8000001F: "reexport", 0x80000023: "upward", 0x20: "lazy"}
++LIMIT = 1024 * 1024 * 1024
++
++
++def version(value):
++    return f"{value >> 16}.{(value >> 8) & 255}.{value & 255}"
++
++
++def os_tuple(value):
++    parts = tuple(int(part) for part in value.split("."))
++    if not 1 <= len(parts) <= 3 or any(part < 0 for part in parts):
++        raise ValueError("Invalid OS version")
++    return parts + (0,) * (3 - len(parts))
++
++
++def parse_macho(data):
++    data = bytes(data)
++    magic = data[:4]
++    if magic in FAT:
++        endian, wide = FAT[magic]
++        if len(data) < 8:
++            raise ValueError("Truncated fat header")
++        count = struct.unpack_from(endian + "I", data, 4)[0]
++        stride = 32 if wide else 20
++        table_end = 8 + count * stride
++        if not 1 <= count <= 16 or table_end > len(data):
++            raise ValueError("Invalid fat architecture table")
++        slices, ranges = [], []
++        for i in range(count):
++            fields = struct.unpack_from(endian + ("IIQQII" if wide else "IIIII"), data, 8 + i * stride)
++            offset, size = fields[2:4]
++            if offset < table_end or size < 28 or offset + size > len(data):
++                raise ValueError("Invalid fat slice bounds")
++            if any(offset < end and start < offset + size for start, end in ranges):
++                raise ValueError("Overlapping fat slices")
++            ranges.append((offset, offset + size))
++            if data[offset:offset + 4] not in THIN:
++                raise ValueError("Invalid Mach-O slice")
++            parsed = parse_macho(data[offset:offset + size])[0]
++            if parsed["cpu_type"] != fields[0] or parsed["cpu_subtype"] != fields[1]:
++                raise ValueError("Fat table and slice architecture disagree")
++            slices.append(parsed)
++        return slices
++    if magic not in THIN:
++        raise ValueError("Not a Mach-O binary")
++    endian, wide = THIN[magic]
++    header_size = 32 if wide else 28
++    if len(data) < header_size:
++        raise ValueError("Truncated Mach-O header")
++    fields = struct.unpack_from(endian + ("8I" if wide else "7I"), data)
++    cpu, subtype, filetype, count, command_bytes = fields[1:6]
++    commands_end = header_size + command_bytes
++    if count > command_bytes // 8 or commands_end > len(data):
++        raise ValueError("Invalid Mach-O load command table")
++    result = {
++        "cpu_type": cpu, "cpu_subtype": subtype,
++        "architecture": {0x100000C: "arm64", 12: "arm", 0x1000007: "x86_64", 7: "x86"}.get(cpu, hex(cpu)),
++        "file_type": filetype, "build_versions": [], "encryption": [], "libraries": [], "rpaths": [],
++    }
++    offset = header_size
++    for _ in range(count):
++        if offset + 8 > commands_end:
++            raise ValueError("Truncated load command")
++        command, size = struct.unpack_from(endian + "II", data, offset)
++        if size < 8 or size % 4 or offset + size > commands_end:
++            raise ValueError("Invalid load command bounds")
++
++        def require(minimum):
++            if size < minimum:
++                raise ValueError("Truncated load command payload")
++
++        def string_at(relative):
++            if not 8 <= relative < size:
++                raise ValueError("Invalid load command string offset")
++            end = data.find(b"\0", offset + relative, offset + size)
++            if end == -1:
++                raise ValueError("Unterminated load command string")
++            return data[offset + relative:end].decode("utf-8", "replace")
++
++        if command == 0x32:
++            require(24)
++            platform, minimum, sdk, tools = struct.unpack_from(endian + "4I", data, offset + 8)
++            if 24 + tools * 8 > size:
++                raise ValueError("Truncated build tool table")
++            result["build_versions"].append({"platform": platform, "minimum_os": version(minimum), "sdk": version(sdk)})
++        elif command in {0x24, 0x25, 0x2F, 0x30}:
++            require(16)
++            minimum, sdk = struct.unpack_from(endian + "II", data, offset + 8)
++            result["build_versions"].append({"platform": {0x24: 1, 0x25: 2, 0x2F: 3, 0x30: 4}[command], "minimum_os": version(minimum), "sdk": version(sdk)})
++        elif command in {0x21, 0x2C}:
++            require(24 if command == 0x2C else 20)
++            start, length, cryptid = struct.unpack_from(endian + "3I", data, offset + 8)
++            if start + length > len(data):
++                raise ValueError("Invalid encrypted region bounds")
++            result["encryption"].append({"cryptid": cryptid, "offset": start, "size": length})
++        elif command in DYLIB_COMMANDS:
++            require(24)
++            relative = struct.unpack_from(endian + "I", data, offset + 8)[0]
++            result["libraries"].append({"path": string_at(relative), "linkage": DYLIB_COMMANDS[command]})
++        elif command == 0x8000001C:
++            require(12)
++            relative = struct.unpack_from(endian + "I", data, offset + 8)[0]
++            result["rpaths"].append(string_at(relative))
++        offset += size
++    if offset != commands_end:
++        raise ValueError("Load command size/count mismatch")
++    return [result]
++
+diff --git a/scripts/package_ipa.sh b/scripts/package_ipa.sh
+index 2ec1376..11a6b1e 100755
+--- a/scripts/package_ipa.sh
++++ b/scripts/package_ipa.sh
+@@ -55,7 +55,8 @@ if command -v xcodegen >/dev/null 2>&1; then
+     echo "==> regenerating the project from project.yml"
+     (cd "$HUSK_ROOT/src/app" && xcodegen generate --quiet)
+ else
+-    echo "==> xcodegen not installed; using the checked-in project as-is" >&2
++    echo "error: xcodegen is required; the checked-in project is not the iOS 15 project" >&2
++    exit 1
+ fi
+ 
+ echo "==> building"
+@@ -141,23 +142,11 @@ for f in vmlinuz-virt initramfs-virt husk-jit.js \
+     fi
+ done
+ 
+-# Built-in StikJIT's helper (without it the app still installs and runs with
+-# StikDebug, but its JIT setup would offer a method that can only fail), and the
+-# widget that draws the download Live Activity.
+-for f in "$APP/PlugIns/HuskJITHelper.appex/HuskJITHelper" \
+-         "$APP/PlugIns/HuskDownloadsWidget.appex/HuskDownloadsWidget" \
+-         "$APP/Frameworks/StikJIT.framework/StikJIT" \
+-         "$APP/Frameworks/StikJIT.framework/Info.plist"; do
+-    if [ ! -f "$f" ]; then
+-        echo "  MISSING  ${f#$APP/}" >&2
+-        rc=1
+-    else
+-        printf "  ok       %-28s %s\n" "$(basename "$f")" "${f#$APP/}"
+-    fi
+-done
+-
+ [ $rc -eq 0 ] || { echo "==> bundle is not installable; refusing to package" >&2; exit 1; }
+ 
++# Check every embedded executable before signing or emitting an IPA.
++python3 "$HUSK_ROOT/scripts/audit_ios15_bundle.py" "$APP"
++
+ echo "==> packaging"
+ STAGE="$(mktemp -d)"
+ mkdir -p "$STAGE/Payload"
+@@ -182,7 +171,9 @@ SAPP="$STAGE/Payload/$(basename "$APP")"
+ sign() { codesign --force --sign - --timestamp=none "$@"; }
+ find "$SAPP" -name "*.dylib" -not -path "*/Frameworks/*.framework/*" | while read -r f; do sign "$f"; done
+ for fw in "$SAPP"/Frameworks/*.framework; do [ -d "$fw" ] && sign "$fw"; done
+-for ex in "$SAPP"/PlugIns/*.appex; do [ -d "$ex" ] && sign "$ex"; done
++for ex in "$SAPP"/PlugIns/*.appex; do
++    if [ -d "$ex" ]; then sign "$ex"; fi
++done
+ sign --entitlements "$ENT" "$SAPP"
+ echo "==> entitlements in the signed app:"
+ EMBEDDED_ENTS=$(codesign -d --entitlements - "$SAPP" 2>&1 || true)
+diff --git a/src/app/Husk/AppDetailView.swift b/src/app/Husk/AppDetailView.swift
+index 2ed1b1d..47aa709 100644
+--- a/src/app/Husk/AppDetailView.swift
++++ b/src/app/Husk/AppDetailView.swift
+@@ -114,9 +114,9 @@ struct AppDetailView: View {
+             }
+ 
+             Section {
+-                LabeledContent("Version", value: live.version ?? "—")
+-                LabeledContent("Size", value: live.sizeBytes.map(Self.bytes) ?? "—")
+-                LabeledContent("Last Used", value: live.lastUsed.map(Self.when) ?? "Never from Husk")
++                HuskLabeledContent("Version", value: live.version ?? "—")
++                HuskLabeledContent("Size", value: live.sizeBytes.map(Self.bytes) ?? "—")
++                HuskLabeledContent("Last Used", value: live.lastUsed.map(Self.when) ?? "Never from Husk")
+             }
+ 
+             Section {
+@@ -136,7 +136,7 @@ struct AppDetailView: View {
+         .listStyle(.insetGrouped)
+         .navigationTitle(live.label)
+         .navigationBarTitleDisplayMode(.inline)
+-        .toolbar { ToolbarItem(placement: .topBarTrailing) { menu } }
++        .toolbar { ToolbarItem(placement: .navigationBarTrailing) { menu } }
+         .confirmationDialog("Uninstall \(live.label)?", isPresented: $confirmUninstall,
+                             titleVisibility: .visible) {
+             Button("Uninstall", role: .destructive) {
+diff --git a/src/app/Husk/AppDiagnosis.swift b/src/app/Husk/AppDiagnosis.swift
+index e2f9f1e..7ae6f54 100644
+--- a/src/app/Husk/AppDiagnosis.swift
++++ b/src/app/Husk/AppDiagnosis.swift
+@@ -240,7 +240,7 @@ struct AppStoppedOverlay: View {
+                 AppDiagnosisCard(diagnosis: diagnosis, showsEvidence: true)
+                 HStack(spacing: 10) {
+                     if let report {
+-                        ShareLink(item: report) { Label("Share Report", systemImage: "square.and.arrow.up").frame(maxWidth: .infinity) }
++                        HuskShareLink(item: report) { Label("Share Report", systemImage: "square.and.arrow.up").frame(maxWidth: .infinity) }
+                             .buttonStyle(.bordered)
+                     }
+                     Button(action: close) { Text("Close").frame(maxWidth: .infinity) }
+diff --git a/src/app/Husk/AppWindows.swift b/src/app/Husk/AppWindows.swift
+index 49f8c12..ac0643f 100644
+--- a/src/app/Husk/AppWindows.swift
++++ b/src/app/Husk/AppWindows.swift
+@@ -36,7 +36,7 @@ import UIKit
+     func open(_ app: TLApp) {
+         if self.app?.id != app.id { frame = nil; maximized = false }
+         self.app = app
+-        withAnimation(.snappy(duration: 0.25)) { minimized = false }
++        withAnimation(.huskSnappy(duration: 0.25)) { minimized = false }
+         TranslationLayerStore.shared.markPlayed(app)
+     }
+ 
+@@ -45,12 +45,12 @@ import UIKit
+         if let only, app?.id != only.id { return }
+         // A web app can be closed for real, as LiveContainer ends an app; a native engine stays loaded, paused.
+         if let app, app.report?.webKind != nil { WebAppRuntime.close(app) }
+-        withAnimation(.snappy(duration: 0.2)) { app = nil; minimized = false }
++        withAnimation(.huskSnappy(duration: 0.2)) { app = nil; minimized = false }
+     }
+ 
+-    func minimize() { withAnimation(.snappy(duration: 0.25)) { minimized = true } }
+-    func restore() { withAnimation(.snappy(duration: 0.25)) { minimized = false } }
+-    func toggleMaximized() { withAnimation(.snappy(duration: 0.25)) { maximized.toggle() } }
++    func minimize() { withAnimation(.huskSnappy(duration: 0.25)) { minimized = true } }
++    func restore() { withAnimation(.huskSnappy(duration: 0.25)) { minimized = false } }
++    func toggleMaximized() { withAnimation(.huskSnappy(duration: 0.25)) { maximized.toggle() } }
+ }
+ 
+ /// The layer the window and the dock live in, over the tabs. Empty space in it lets touches through to Husk underneath.
+@@ -297,7 +297,7 @@ private struct WindowDock: View {
+                     .onChanged { drag = $0.translation }
+                     .onEnded { v in
+                         let endX = x + v.translation.width
+-                        withAnimation(.snappy(duration: 0.25)) {
++                        withAnimation(.huskSnappy(duration: 0.25)) {
+                             windows.dockLeft = endX < container.width / 2
+                             windows.dockY = min(max((y + v.translation.height) / container.height, 0), 1)
+                             drag = .zero
+diff --git a/src/app/Husk/BootScreen.swift b/src/app/Husk/BootScreen.swift
+index 8a0bd2e..7aa5c37 100644
+--- a/src/app/Husk/BootScreen.swift
++++ b/src/app/Husk/BootScreen.swift
+@@ -117,7 +117,7 @@ struct BootScreen: View {
+                     Capsule().fill(Theme.surfaceHigh)
+                     Capsule().fill(Theme.accent)
+                         .frame(width: geo.size.width * fraction)
+-                        .animation(.snappy(duration: 0.4), value: fraction)
++                        .animation(.huskSnappy(duration: 0.4), value: fraction)
+                 }
+             }
+             .frame(height: 5)
+diff --git a/src/app/Husk/ContentView.swift b/src/app/Husk/ContentView.swift
+index e95d66d..7920ac6 100644
+--- a/src/app/Husk/ContentView.swift
++++ b/src/app/Husk/ContentView.swift
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ import SwiftUI
++import NavigationBackport
+ import UIKit
+ 
+ /// Routes between the four things Husk can be doing.
+@@ -83,7 +84,7 @@ struct ContentView: View {
+                 }
+                 .task(id: toast.id) {
+                     try? await Task.sleep(nanoseconds: 4_500_000_000)
+-                    withAnimation(.snappy) {
++                    withAnimation(.huskSnappy) {
+                         if host.toast?.id == toast.id { host.toast = nil }
+                     }
+                 }
+@@ -114,8 +115,8 @@ struct ContentView: View {
+         // window rather than with .preferredColorScheme — see Theme.apply.
+         .onAppear { Theme.apply(appearance) }
+         .onChange(of: appearance) { Theme.apply($0) }
+-        .animation(.snappy(duration: 0.22), value: showGuestScreen)
+-        .animation(.snappy(duration: 0.25), value: host.toast)
++        .animation(.huskSnappy(duration: 0.22), value: showGuestScreen)
++        .animation(.huskSnappy(duration: 0.25), value: host.toast)
+         .fullScreenCover(isPresented: $showOnboarding) {
+             OnboardingView {
+                 showOnboarding = false
+@@ -164,8 +165,8 @@ struct ContentView: View {
+         .sheet(isPresented: Binding(get: { !incoming.waiting.isEmpty },
+                                     set: { if !$0 { incoming.discard() } })) {
+             IncomingChooser()
+-                .presentationDetents([.medium])
+-                .presentationDragIndicator(.visible)
++                .huskPresentationDetents([.medium])
++                .huskPresentationDragIndicator()
+         }
+         // APKs meant for Android wait until it can take them.
+         .onChange(of: host.isReady) { ready in
+@@ -473,10 +474,10 @@ struct GuestScreenView: View {
+         // document picker is up, and an importer attached to a view that goes
+         // away goes away with it.
+         .statusBarHidden(true)
+-        .persistentSystemOverlays(.hidden)
++        .huskHideSystemOverlays()
+         .sheet(isPresented: $showControls) {
+             ControlsSheet(keyboard: $keyboard)
+-                .presentationDetents([.height(300)])
++                .huskPresentationDetents([.height(300)])
+         }
+     }
+ }
+@@ -495,7 +496,7 @@ struct LogView: View {
+     private let tick = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
+ 
+     var body: some View {
+-        NavigationStack {
++        NBNavigationStack {
+             ScrollViewReader { proxy in
+                 ScrollView {
+                     LazyVStack(alignment: .leading, spacing: 1) {
+diff --git a/src/app/Husk/CrashReport.swift b/src/app/Husk/CrashReport.swift
+index ce251c5..083943b 100644
+--- a/src/app/Husk/CrashReport.swift
++++ b/src/app/Husk/CrashReport.swift
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ import SwiftUI
++import NavigationBackport
+ import UIKit
+ 
+ /// "That game closed Husk": noticed at the next launch, explained, and easy to send on.
+@@ -167,7 +168,7 @@ struct CrashReportSheet: View {
+     @State private var file: URL?
+ 
+     var body: some View {
+-        NavigationStack {
++        NBNavigationStack {
+             ScrollView {
+                 VStack(alignment: .leading, spacing: 18) {
+                     HStack(spacing: 14) {
+@@ -193,7 +194,7 @@ struct CrashReportSheet: View {
+                     }
+ 
+                     if let file {
+-                        ShareLink(item: file) {
++                        HuskShareLink(item: file) {
+                             Label("Share Report", systemImage: "square.and.arrow.up")
+                                 .frame(maxWidth: .infinity).padding(.vertical, 6)
+                         }
+diff --git a/src/app/Husk/DiscoverTab.swift b/src/app/Husk/DiscoverTab.swift
+index 4a70482..3c71ca0 100644
+--- a/src/app/Husk/DiscoverTab.swift
++++ b/src/app/Husk/DiscoverTab.swift
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ import SwiftUI
++import NavigationBackport
+ 
+ /// Apps from the repositories you add, to install into Android. Pushed from Settings, so it has no navigation stack of its own.
+ struct DiscoverView: View {
+@@ -33,7 +34,7 @@ struct DiscoverView: View {
+         .navigationBarTitleDisplayMode(.large)
+         .searchable(text: $searchText, prompt: "Search \(totalAppCount) apps")
+         .toolbar {
+-            ToolbarItemGroup(placement: .topBarTrailing) {
++            ToolbarItemGroup(placement: .navigationBarTrailing) {
+                 Button { Task { await manager.fetchSources() } } label: {
+                     Label("Refresh", systemImage: "arrow.clockwise")
+                 }
+@@ -168,11 +169,11 @@ struct DiscoverView: View {
+     // MARK: - Add Source Sheet
+ 
+     private var addSourceSheet: some View {
+-        NavigationStack {
++        NBNavigationStack {
+             Form {
+                 Section {
+                     TextField("https://f-droid.org/repo/index-v1.json", text: $newSourceURL)
+-                        .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
++                        .keyboardType(.URL).textInputAutocapitalization(.never).disableAutocorrection(true)
+                 } header: {
+                     Text("Source URL")
+                 } footer: {
+@@ -203,10 +204,10 @@ struct DiscoverView: View {
+             .navigationTitle("Add Source")
+             .navigationBarTitleDisplayMode(.inline)
+             .toolbar {
+-                ToolbarItem(placement: .topBarLeading) {
++                ToolbarItem(placement: .navigationBarLeading) {
+                     Button("Cancel") { newSourceURL = ""; showingAddSource = false }
+                 }
+-                ToolbarItem(placement: .topBarTrailing) {
++                ToolbarItem(placement: .navigationBarTrailing) {
+                     Button("Add") {
+                         let url = newSourceURL
+                         newSourceURL = ""
+@@ -224,7 +225,7 @@ struct DiscoverView: View {
+     // MARK: - Manage Sources Sheet
+ 
+     private var sourcesSheet: some View {
+-        NavigationStack {
++        NBNavigationStack {
+             List {
+                 Section {
+                     ForEach(manager.sourceURLs, id: \.self) { url in
+@@ -243,10 +244,10 @@ struct DiscoverView: View {
+             .navigationTitle("Repositories")
+             .navigationBarTitleDisplayMode(.inline)
+             .toolbar {
+-                ToolbarItem(placement: .topBarLeading) {
++                ToolbarItem(placement: .navigationBarLeading) {
+                     Button("Done") { showingSources = false }
+                 }
+-                ToolbarItem(placement: .topBarTrailing) {
++                ToolbarItem(placement: .navigationBarTrailing) {
+                     Button { showingSources = false; showingAddSource = true } label: {
+                         Image(systemName: "plus")
+                     }
+diff --git a/src/app/Husk/Downloads.swift b/src/app/Husk/Downloads.swift
+index 5cbd2b5..75fd432 100644
+--- a/src/app/Husk/Downloads.swift
++++ b/src/app/Husk/Downloads.swift
+@@ -3,7 +3,7 @@ import AVFoundation
+ import BackgroundTasks
+ import Foundation
+ import UIKit
+-#if canImport(ActivityKit)
++#if canImport(ActivityKit) && !HUSK_IOS15
+ import ActivityKit
+ #endif
+ 
+@@ -683,18 +683,18 @@ enum LiveDownload {
+     static func update(jobs: [Downloads.Job], speed: Double) {
+         if #available(iOS 26.0, *), ContinuedDownload.update(jobs: jobs, speed: speed) {
+             // The system's own progress is showing; Husk's Live Activity would only repeat it.
+-            #if canImport(ActivityKit)
++            #if canImport(ActivityKit) && !HUSK_IOS15
+             if #available(iOS 16.1, *) { Live.end() }
+             #endif
+             return
+         }
+-        #if canImport(ActivityKit)
++        #if canImport(ActivityKit) && !HUSK_IOS15
+         if #available(iOS 16.1, *) { Live.update(jobs: jobs, speed: speed) }
+         #endif
+     }
+ }
+ 
+-#if canImport(ActivityKit)
++#if canImport(ActivityKit) && !HUSK_IOS15
+ @available(iOS 16.1, *)
+ @MainActor
+ private enum Live {
+diff --git a/src/app/Husk/DownloadsTab.swift b/src/app/Husk/DownloadsTab.swift
+index 0ca7f3c..3c5d8b3 100644
+--- a/src/app/Husk/DownloadsTab.swift
++++ b/src/app/Husk/DownloadsTab.swift
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ import SwiftUI
++import NavigationBackport
+ 
+ /// Downloads from a link, and what has an update.
+ struct DownloadsTab: View {
+@@ -10,7 +11,7 @@ struct DownloadsTab: View {
+     @Environment(\.dismiss) private var dismiss
+ 
+     var body: some View {
+-        NavigationStack {
++        NBNavigationStack {
+             List {
+                 updatesSection
+                 Section {
+@@ -133,13 +134,13 @@ private struct AddDownloadSheet: View {
+     @State private var working = false
+ 
+     var body: some View {
+-        NavigationStack {
++        NBNavigationStack {
+             Form {
+                 Section {
+                     TextField("https://… or http://192.168.1.20:8642/", text: $link)
+                         .keyboardType(.URL)
+                         .textInputAutocapitalization(.never)
+-                        .autocorrectionDisabled()
++                        .disableAutocorrection(true)
+                 } footer: {
+                     if let problem = downloads.problem { Text(problem).foregroundStyle(.orange) }
+                 }
+diff --git a/src/app/Husk/FilesTab.swift b/src/app/Husk/FilesTab.swift
+index 3145e21..4beaf06 100644
+--- a/src/app/Husk/FilesTab.swift
++++ b/src/app/Husk/FilesTab.swift
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ import SwiftUI
++import NavigationBackport
+ import UniformTypeIdentifiers
+ 
+ /// The guest's storage, browsable.
+@@ -17,9 +18,9 @@ struct FilesTab: View {
+     @Environment(\.dismiss) private var dismiss
+ 
+     var body: some View {
+-        NavigationStack(path: $router.files) {
++        NBNavigationStack(path: $router.files) {
+             DirectoryView(path: Self.root, title: "Files")
+-                .navigationDestination(for: String.self) { path in
++                .nbNavigationDestination(for: String.self) { path in
+                     DirectoryView(path: path,
+                                   title: (path as NSString).lastPathComponent)
+                 }
+@@ -74,14 +75,14 @@ struct DirectoryView: View {
+         .navigationTitle(title)
+         .navigationBarTitleDisplayMode(path == FilesTab.root ? .large : .inline)
+         .toolbar {
+-            ToolbarItemGroup(placement: .topBarTrailing) {
++            ToolbarItemGroup(placement: .navigationBarTrailing) {
+                 Button { load() } label: { Label("Refresh", systemImage: "arrow.clockwise") }
+                 Button { showImportSheet = true } label: { Label("Import", systemImage: "plus") }
+             }
+         }
+         .sheet(isPresented: $showImportSheet) {
+             ImportSheet(destination: path) { showImportSheet = false; importing = true }
+-                .presentationDetents([.height(340)])
++                .huskPresentationDetents([.height(340)])
+         }
+         .huskFilePicker(isPresented: $importing) { urls in
+             host.sendFiles(urls, to: path)
+@@ -104,7 +105,7 @@ struct DirectoryView: View {
+ 
+     @ViewBuilder private func row(_ e: AndroidHost.GuestEntry) -> some View {
+         if e.isDirectory {
+-            NavigationLink(value: e.path) {
++            NBNavigationLink(value: e.path) {
+                 fileLabel(icon: "folder.fill", tint: .accentColor, title: e.name,
+                           subtitle: e.modified.map(Self.when))
+             }
+@@ -214,7 +215,7 @@ struct ImportSheet: View {
+     @Environment(\.dismiss) private var dismiss
+ 
+     var body: some View {
+-        NavigationStack {
++        NBNavigationStack {
+             VStack(spacing: 18) {
+                 VStack(spacing: 10) {
+                     Image(systemName: "doc.badge.plus")
+@@ -241,7 +242,7 @@ struct ImportSheet: View {
+             .navigationTitle("Import")
+             .navigationBarTitleDisplayMode(.inline)
+             .toolbar {
+-                ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
++                ToolbarItem(placement: .navigationBarTrailing) { Button("Done") { dismiss() } }
+             }
+         }
+     }
+diff --git a/src/app/Husk/HuskApp.swift b/src/app/Husk/HuskApp.swift
+index 033fd28..941f9a7 100644
+--- a/src/app/Husk/HuskApp.swift
++++ b/src/app/Husk/HuskApp.swift
+@@ -16,6 +16,10 @@ enum HuskOrientation {
+     /// a moment apart, for as long as `new` is still what is wanted.
+     @MainActor static func set(_ new: UIInterfaceOrientationMask, attempt: Int = 0) {
+         mask = new
++        guard #available(iOS 16.0, *) else {
++            UIViewController.attemptRotationToDeviceOrientation()
++            return
++        }
+         for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+             var vc = scene.keyWindow?.rootViewController
+             while let v = vc { v.setNeedsUpdateOfSupportedInterfaceOrientations(); vc = v.presentedViewController }
+diff --git a/src/app/Husk/IOS15Compatibility.swift b/src/app/Husk/IOS15Compatibility.swift
+new file mode 100644
+index 0000000..a2bc37a
+--- /dev/null
++++ b/src/app/Husk/IOS15Compatibility.swift
+@@ -0,0 +1,129 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++import SwiftUI
++
++/// The label/value rows used by Husk, without requiring iOS 16 LabeledContent.
++struct HuskLabeledContent<Label: View, Content: View>: View {
++    private let label: Label
++    private let content: Content
++
++    init(@ViewBuilder content: () -> Content, @ViewBuilder label: () -> Label) {
++        self.label = label()
++        self.content = content()
++    }
++
++    var body: some View {
++        HStack(alignment: .firstTextBaseline) {
++            label
++            Spacer(minLength: 12)
++            content.foregroundStyle(.secondary).multilineTextAlignment(.trailing)
++        }
++    }
++}
++
++extension HuskLabeledContent where Label == Text {
++    init(_ title: String, @ViewBuilder content: () -> Content) {
++        self.init(content: content, label: { Text(title) })
++    }
++}
++
++extension HuskLabeledContent where Label == Text, Content == Text {
++    init(_ title: String, value: String) {
++        self.init(content: { Text(value) }, label: { Text(title) })
++    }
++}
++
++/// All current share links export report files. Reuse the app's UIKit sheet.
++struct HuskShareLink<Label: View>: View {
++    let item: URL
++    private let label: Label
++    @State private var sharing = false
++
++    init(item: URL, @ViewBuilder label: () -> Label) {
++        self.item = item
++        self.label = label()
++    }
++
++    var body: some View {
++        Button { sharing = true } label: { label }
++            .sheet(isPresented: $sharing) { ShareSheet(items: [item]) }
++    }
++}
++
++enum HuskSheetDetent: Hashable {
++    case medium
++    case height(CGFloat)
++
++    @available(iOS 16.0, *)
++    var native: PresentationDetent {
++        switch self {
++        case .medium: return .medium
++        case .height(let value): return .height(value)
++        }
++    }
++}
++
++extension View {
++    @ViewBuilder func huskHideSystemOverlays() -> some View {
++        if #available(iOS 16.0, *) {
++            persistentSystemOverlays(.hidden)
++        } else {
++            self
++        }
++    }
++
++    @ViewBuilder func huskDeferSystemGestures() -> some View {
++        if #available(iOS 16.0, *) {
++            defersSystemGestures(on: .all)
++        } else {
++            self
++        }
++    }
++
++    @ViewBuilder func huskDismissKeyboardOnScroll() -> some View {
++        if #available(iOS 16.0, *) {
++            scrollDismissesKeyboard(.immediately)
++        } else {
++            simultaneousGesture(DragGesture().onChanged { _ in
++                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder),
++                                                 to: nil, from: nil, for: nil)
++            })
++        }
++    }
++
++    /// iOS 15 keeps its standard sheet, including swipe-to-dismiss. Later
++    /// systems retain the upstream compact heights.
++    @ViewBuilder func huskPresentationDetents(_ detents: Set<HuskSheetDetent>) -> some View {
++        if #available(iOS 16.0, *) {
++            presentationDetents(Set(detents.map(\.native)))
++        } else {
++            self
++        }
++    }
++
++    @ViewBuilder func huskPresentationDragIndicator() -> some View {
++        if #available(iOS 16.0, *) {
++            presentationDragIndicator(.visible)
++        } else {
++            self
++        }
++    }
++
++    @ViewBuilder func huskHideScrollIndicators() -> some View {
++        if #available(iOS 16.0, *) {
++            scrollIndicators(.hidden)
++        } else {
++            self
++        }
++    }
++}
++
++extension Animation {
++    static var huskSnappy: Animation { huskSnappy(duration: 0.5) }
++
++    static func huskSnappy(duration: Double) -> Animation {
++        if #available(iOS 17.0, *) {
++            return .snappy(duration: duration)
++        }
++        return .spring(response: duration, dampingFraction: 0.85)
++    }
++}
+diff --git a/src/app/Husk/Info.plist b/src/app/Husk/Info.plist
+index 08b56b1..f650a23 100644
+--- a/src/app/Husk/Info.plist
++++ b/src/app/Husk/Info.plist
+@@ -76,10 +76,6 @@
+ 	</array>
+ 	<key>NSLocalNetworkUsageDescription</key>
+ 	<string>Husk uses the local network to pair with this iPhone for JIT, without a computer.</string>
+-	<key>NSSupportsLiveActivities</key>
+-	<true/>
+-	<key>NSSupportsLiveActivitiesFrequentUpdates</key>
+-	<true/>
+ 	<key>UIBackgroundModes</key>
+ 	<array>
+ 		<string>audio</string>
+diff --git a/src/app/Husk/ItemPages.swift b/src/app/Husk/ItemPages.swift
+index 003d1f3..fe02293 100644
+--- a/src/app/Husk/ItemPages.swift
++++ b/src/app/Husk/ItemPages.swift
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ import SwiftUI
++import NavigationBackport
+ 
+ // MARK: - the top of every page
+ 
+@@ -159,10 +160,10 @@ struct GamePage: View {
+             }
+ 
+             Section {
+-                NavigationLink(value: LibraryRoute.gameSettings(app.id)) {
++                NBNavigationLink(value: LibraryRoute.gameSettings(app.id)) {
+                     Label("Game Settings", systemImage: "slider.horizontal.3")
+                 }
+-                NavigationLink(value: LibraryRoute.gameReport(app.id)) {
++                NBNavigationLink(value: LibraryRoute.gameReport(app.id)) {
+                     Label("Technical Details", systemImage: "cpu")
+                 }
+             }
+@@ -183,14 +184,14 @@ struct GamePage: View {
+             }
+ 
+             Section("About") {
+-                LabeledContent("Runs With", value: app.report?.runnerName ?? "Unknown")
++                HuskLabeledContent("Runs With", value: app.report?.runnerName ?? "Unknown")
+                 if let st = GameStatusStore.shared.status(app.id) {
+-                    LabeledContent("Last Result") {
++                    HuskLabeledContent("Last Result") {
+                         Label(st.result.label, systemImage: st.result.symbol).foregroundStyle(st.result.color)
+                     }
+                 }
+-                LabeledContent("Last Played", value: app.lastPlayed.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "Never")
+-                LabeledContent("Size", value: fileBytes(app.apks))
++                HuskLabeledContent("Last Played", value: app.lastPlayed.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "Never")
++                HuskLabeledContent("Size", value: fileBytes(app.apks))
+             }
+ 
+             Section {
+@@ -377,10 +378,10 @@ struct AndroidAppPage: View {
+             }
+ 
+             Section("About") {
+-                LabeledContent("Version", value: live.version ?? "—")
+-                LabeledContent("Size", value: live.sizeBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "—")
+-                LabeledContent("Package", value: live.name)
+-                if let b = live.bitness { LabeledContent("Architecture", value: b) }
++                HuskLabeledContent("Version", value: live.version ?? "—")
++                HuskLabeledContent("Size", value: live.sizeBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "—")
++                HuskLabeledContent("Package", value: live.name)
++                if let b = live.bitness { HuskLabeledContent("Architecture", value: b) }
+             }
+ 
+             Section {
+@@ -437,7 +438,7 @@ struct AndroidAppPage: View {
+                 router.startAndroid()
+             }
+         } else {
+-            NavigationLink(value: LibraryRoute.androidSystem) {
++            NBNavigationLink(value: LibraryRoute.androidSystem) {
+                 Label("Get Android First", systemImage: "arrow.down.circle")
+                     .font(.system(.headline, design: .rounded))
+                     .frame(maxWidth: .infinity).frame(height: 50)
+diff --git a/src/app/Husk/JITBuiltIn.swift b/src/app/Husk/JITBuiltIn.swift
+index 49410b7..49d7fb7 100644
+--- a/src/app/Husk/JITBuiltIn.swift
++++ b/src/app/Husk/JITBuiltIn.swift
+@@ -42,7 +42,9 @@ enum HuskBuiltInJIT {
+     private static var running: [HelperRequest] = []
+ 
+     static var unavailableReason: String? {
+-#if targetEnvironment(simulator)
++#if HUSK_IOS15
++        return "This iOS 15 build uses TrollStore or Dopamine for JIT."
++#elseif targetEnvironment(simulator)
+         return "Built-in JIT is available only on a physical device."
+ #else
+         guard #available(iOS 26.0, *) else {
+diff --git a/src/app/Husk/JITSetup.swift b/src/app/Husk/JITSetup.swift
+index 058281d..c77ed5f 100644
+--- a/src/app/Husk/JITSetup.swift
++++ b/src/app/Husk/JITSetup.swift
+@@ -137,16 +137,25 @@ final class JITCoordinator: ObservableObject {
+ 
+     var resolvedMethod: JITMethod {
+         guard method == .automatic else { return method }
++#if HUSK_IOS15
++        if JITBootstrap.isJailbroken { return .jailbreak }
++        if #available(iOS 17.4, *), JITBootstrap.isStikDebugInstalled { return .stikDebug }
++        return .trollStore
++#else
+         if JITBootstrap.isStikDebugInstalled { return .stikDebug }
+         if JITBootstrap.isTrollStoreInstalled { return .trollStore }
+         if JITBootstrap.isJailbroken { return .jailbreak }
+         return .builtIn
++#endif
+     }
+ 
+     var automaticDescription: String {
+         switch resolvedMethod {
+         case .stikDebug: return "StikDebug is installed, so Husk will open it."
+-        case .trollStore: return "TrollStore is installed, so Husk will ask it to enable JIT."
++        case .trollStore:
++            return JITBootstrap.isTrollStoreInstalled
++                ? "TrollStore is installed, so Husk will ask it to enable JIT."
++                : "Install Husk through TrollStore, or enable Allow JIT in Apps in Dopamine."
+         case .jailbreak: return "This device is jailbroken, so JIT comes from the jailbreak's Allow JIT in Apps setting."
+         default: return "StikDebug, TrollStore and a jailbreak were not found, so Husk will use its built-in helper."
+         }
+diff --git a/src/app/Husk/JITSetupView.swift b/src/app/Husk/JITSetupView.swift
+index 053c8af..363158b 100644
+--- a/src/app/Husk/JITSetupView.swift
++++ b/src/app/Husk/JITSetupView.swift
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ import SwiftUI
++import NavigationBackport
+ import UniformTypeIdentifiers
+ 
+ /// The JIT walkthrough: pick a way in, follow its numbered steps, end with JIT on.
+@@ -20,9 +21,9 @@ struct JITSetupFlow: View {
+     private var device: String { OnDevicePairing.deviceKind }
+ 
+     var body: some View {
+-        NavigationStack(path: $path) {
++        NBNavigationStack(path: $path) {
+             choose
+-                .navigationDestination(for: Step.self) { step in
++                .nbNavigationDestination(for: Step.self) { step in
+                     switch step {
+                     case .pairOnDevice: pairOnDevice
+                     case .importFile: importFile
+@@ -65,8 +66,8 @@ struct JITSetupFlow: View {
+ 
+     private var choose: some View {
+         page(symbol: "bolt.fill", title: "Turn on JIT",
+-             subtitle: "Android needs memory it can write and then run, which on iOS only an attached "
+-                     + "debugger can grant. Choose how your \(device) gets one.") {
++             subtitle: "Android needs permission to write and execute generated code. "
++                     + "On iOS 15, use TrollStore or Dopamine with Allow JIT in Apps enabled.") {
+             VStack(spacing: 10) {
+                 let builtIn = HuskBuiltInJIT.unavailableReason
+                 way("Pair on this \(device)", symbol: "iphone.radiowaves.left.and.right",
+@@ -81,9 +82,10 @@ struct JITSetupFlow: View {
+                     done: jit.pairingSource == .imported,
+                     enabled: builtIn == nil) { path.append(.importFile) }
+                 way("Use StikDebug", symbol: "ant",
+-                    detail: JITBootstrap.isStikDebugInstalled ? "StikDebug is installed."
+-                        : "Enable JIT through the StikDebug app.",
+-                    done: jit.method == .stikDebug) { path.append(.stikDebug) }
++                    detail: "StikDebug requires iOS 17.4 or later.",
++                    done: jit.method == .stikDebug,
++                    enabled: ProcessInfo.processInfo.isOperatingSystemAtLeast(
++                        OperatingSystemVersion(majorVersion: 17, minorVersion: 4, patchVersion: 0))) { path.append(.stikDebug) }
+                 way("Use TrollStore", symbol: "sparkles",
+                     detail: JITBootstrap.isTrollStoreInstalled ? "TrollStore is installed."
+                         : "For a Husk installed through TrollStore.",
+diff --git a/src/app/Husk/Launcher.swift b/src/app/Husk/Launcher.swift
+index e800074..cf31732 100644
+--- a/src/app/Husk/Launcher.swift
++++ b/src/app/Husk/Launcher.swift
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ import SwiftUI
++import NavigationBackport
+ 
+ // MARK: - one library
+ 
+@@ -141,7 +142,7 @@ struct HomeView: View {
+     private var all: [LibraryItem] { Launcher.byRecent(Launcher.items(store: store, host: host)) }
+ 
+     var body: some View {
+-        NavigationStack(path: $router.home) {
++        NBNavigationStack(path: $router.home) {
+             ScrollView {
+                 VStack(alignment: .leading, spacing: 14) {
+                     HStack(spacing: 10) {
+@@ -186,7 +187,7 @@ struct HomeView: View {
+                             .padding(.top, 6)
+                         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4), spacing: 10) {
+                             ForEach(rest.prefix(UIDevice.current.userInterfaceIdiom == .pad ? 16 : 8)) { item in
+-                                NavigationLink(value: item.route) { LibrarySquare(item: item) }
++                                NBNavigationLink(value: item.route) { LibrarySquare(item: item) }
+                                     .buttonStyle(CardButtonStyle())
+                                     .accessibilityLabel(item.title)
+                             }
+@@ -198,9 +199,9 @@ struct HomeView: View {
+                 .padding(.bottom, 32)
+                 .id(jit.attachGeneration)
+             }
+-            .scrollIndicators(.hidden)
++            .huskHideScrollIndicators()
+             .background(Color(uiColor: .systemBackground).ignoresSafeArea())
+-            .toolbar(.hidden, for: .navigationBar)
++            .navigationBarHidden(true)
+             .libraryDestinations()
+         }
+     }
+@@ -241,7 +242,7 @@ private struct LeadTile: View {
+ 
+     var body: some View {
+         VStack(spacing: 0) {
+-            NavigationLink(value: item.route) {
++            NBNavigationLink(value: item.route) {
+                 ItemBackdrop(item: item)
+                     .frame(height: 150)
+                     .frame(maxWidth: .infinity)
+@@ -249,7 +250,7 @@ private struct LeadTile: View {
+             }
+             .buttonStyle(.plain)
+             HStack(spacing: 12) {
+-                NavigationLink(value: item.route) {
++                NBNavigationLink(value: item.route) {
+                     HStack(spacing: 12) {
+                         ItemIcon(item: item, size: 40)
+                         VStack(alignment: .leading, spacing: 2) {
+@@ -373,7 +374,7 @@ private struct AndroidTile: View {
+     var body: some View {
+         Tile(padding: 14) {
+             HStack(spacing: 12) {
+-                NavigationLink(value: LibraryItem.android.route) {
++                NBNavigationLink(value: LibraryItem.android.route) {
+                     HStack(spacing: 12) {
+                         TileGlyph(systemImage: "apps.iphone", color: AndroidMark.green, size: 40)
+                         VStack(alignment: .leading, spacing: 2) {
+@@ -562,7 +563,7 @@ struct LibraryScreen: View {
+     @State private var query = ""
+ 
+     var body: some View {
+-        NavigationStack(path: $router.library) {
++        NBNavigationStack(path: $router.library) {
+             ScrollView {
+                 VStack(alignment: .leading, spacing: 14) {
+                     HStack {
+@@ -601,10 +602,10 @@ struct LibraryScreen: View {
+                 .padding(.top, 8)
+                 .padding(.bottom, 32)
+             }
+-            .scrollIndicators(.hidden)
+-            .scrollDismissesKeyboard(.immediately)
++            .huskHideScrollIndicators()
++            .huskDismissKeyboardOnScroll()
+             .background(Color(uiColor: .systemBackground).ignoresSafeArea())
+-            .toolbar(.hidden, for: .navigationBar)
++            .navigationBarHidden(true)
+             .libraryDestinations()
+         }
+     }
+@@ -625,7 +626,7 @@ struct LibraryScreen: View {
+                                                  count: UIDevice.current.userInterfaceIdiom == .pad ? 8 : 4),
+                                   spacing: 18) {
+                             ForEach(items) { item in
+-                                NavigationLink(value: item.route) {
++                                NBNavigationLink(value: item.route) {
+                                     LauncherTile(title: item.title, iconPath: item.iconPath, item: item, caption: caption(item), size: 60)
+                                 }
+                                 .buttonStyle(CardButtonStyle())
+@@ -744,7 +745,7 @@ struct SearchField: View {
+                 TextField(prompt, text: $text)
+                     .focused($focused)
+                     .submitLabel(.search)
+-                    .autocorrectionDisabled()
++                    .disableAutocorrection(true)
+                     .textInputAutocapitalization(.never)
+                 if !text.isEmpty {
+                     Button { text = "" } label: {
+@@ -789,8 +790,8 @@ func matches(_ query: String, _ names: String...) -> Bool {
+ extension View {
+     /// The pages an item opens, for whichever stack shows it.
+     func libraryDestinations() -> some View {
+-        navigationDestination(for: LibraryRoute.self) { route in
+-            LibraryRouteView(route: route).toolbar(.visible, for: .navigationBar)
++        nbNavigationDestination(for: LibraryRoute.self) { route in
++            LibraryRouteView(route: route).navigationBarHidden(false)
+         }
+     }
+ }
+diff --git a/src/app/Husk/OnboardingView.swift b/src/app/Husk/OnboardingView.swift
+index b1e4d9f..916a1e2 100644
+--- a/src/app/Husk/OnboardingView.swift
++++ b/src/app/Husk/OnboardingView.swift
+@@ -65,12 +65,12 @@ struct OnboardingView: View {
+                             Capsule()
+                                 .fill(i == page ? Theme.accent : Color.secondary.opacity(0.3))
+                                 .frame(width: i == page ? 18 : 6, height: 6)
+-                                .animation(.snappy, value: page)
++                                .animation(.huskSnappy, value: page)
+                         }
+                     }
+                     Button {
+                         if page < pages - 1 {
+-                            withAnimation(.snappy) { page += 1 }
++                            withAnimation(.huskSnappy) { page += 1 }
+                         } else {
+                             save()
+                             onDone()
+diff --git a/src/app/Husk/Play/GoogleSignInSheet.swift b/src/app/Husk/Play/GoogleSignInSheet.swift
+index 4dd8f8e..5e285e5 100644
+--- a/src/app/Husk/Play/GoogleSignInSheet.swift
++++ b/src/app/Husk/Play/GoogleSignInSheet.swift
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ import SwiftUI
++import NavigationBackport
+ import WebKit
+ 
+ /// Sheet hosting WKWebView pointing to https://accounts.google.com/EmbeddedSetup to sign in.
+@@ -13,7 +14,7 @@ struct GoogleSignInSheet: View {
+     @State private var promptError: String?
+ 
+     var body: some View {
+-        NavigationStack {
++        NBNavigationStack {
+             ZStack {
+                 Theme.backdrop.ignoresSafeArea()
+ 
+diff --git a/src/app/Husk/Play/StoreView.swift b/src/app/Husk/Play/StoreView.swift
+index 9a80693..95445f3 100644
+--- a/src/app/Husk/Play/StoreView.swift
++++ b/src/app/Husk/Play/StoreView.swift
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ import SwiftUI
++import NavigationBackport
+ 
+ /// Google Play Store tab in Husk.
+ /// Lets users sign in with their Google account, browse/search Play Store, view app details,
+@@ -12,7 +13,7 @@ struct StoreView: View {
+     @State private var selectedApp: PlayAPI.PlayApp?
+ 
+     var body: some View {
+-        NavigationStack {
++        NBNavigationStack {
+             Group {
+                 if !manager.isSignedIn {
+                     signedOutState
+@@ -28,7 +29,7 @@ struct StoreView: View {
+             .navigationBarTitleDisplayMode(.large)
+             .searchable(text: $searchText, prompt: "Search Google Play")
+             .toolbar {
+-                ToolbarItemGroup(placement: .topBarTrailing) {
++                ToolbarItemGroup(placement: .navigationBarTrailing) {
+                     if manager.isSignedIn {
+                         Menu {
+                             if let s = manager.session {
+@@ -317,7 +318,7 @@ struct PlayAppDetailSheet: View {
+     @ObservedObject private var manager = PlayStoreManager.shared
+ 
+     var body: some View {
+-        NavigationStack {
++        NBNavigationStack {
+             ScrollView {
+                 VStack(alignment: .leading, spacing: 20) {
+                     // Header: Icon, Title, Developer, Get Button
+diff --git a/src/app/Husk/Resources/legal/LICENSE-NavigationBackport-MIT.txt b/src/app/Husk/Resources/legal/LICENSE-NavigationBackport-MIT.txt
+new file mode 100644
+index 0000000..27c7225
+--- /dev/null
++++ b/src/app/Husk/Resources/legal/LICENSE-NavigationBackport-MIT.txt
+@@ -0,0 +1,19 @@
++Copyright (c) 2022 johnpatrickmorgan <johnpatrickmorganuk@gmail.com>
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in
++all copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++THE SOFTWARE.
+diff --git a/src/app/Husk/SettingsTab.swift b/src/app/Husk/SettingsTab.swift
+index 5240506..2c86340 100644
+--- a/src/app/Husk/SettingsTab.swift
++++ b/src/app/Husk/SettingsTab.swift
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ import SwiftUI
++import NavigationBackport
+ 
+ /// Settings, as the iOS Settings app lays them out: a card for the app up top, then groups of rows that each
+ /// push a page of their own. What belongs to the app, what belongs to the emulator, and what the thing is.
+@@ -7,7 +8,7 @@ struct SettingsTab: View {
+     @AppStorage(AppWindows.defaultKey) private var multitask = false
+ 
+     var body: some View {
+-        NavigationStack {
++        NBNavigationStack {
+             List {
+                 Section {
+                     NavigationLink { AboutSettings() } label: { appCard }
+@@ -787,9 +788,9 @@ struct AboutSettings: View {
+             }
+ 
+             Section {
+-                LabeledContent("Build", value: Bundle.main.commit)
+-                LabeledContent("Guest image", value: GuestImage.imageVersion)
+-                LabeledContent("Renderer",
++                HuskLabeledContent("Build", value: Bundle.main.commit)
++                HuskLabeledContent("Guest image", value: GuestImage.imageVersion)
++                HuskLabeledContent("Renderer",
+                                value: runner.displayKind == .gl ? "GPU"
+                                     : runner.displayKind == .software ? "CPU"
+                                     : "Not started")
+diff --git a/src/app/Husk/Showcase.swift b/src/app/Husk/Showcase.swift
+index af080d4..c7daa11 100644
+--- a/src/app/Husk/Showcase.swift
++++ b/src/app/Husk/Showcase.swift
+@@ -160,7 +160,7 @@ struct ShowcaseGallery: View {
+                     }
+                 }
+             }
+-            .scrollIndicators(.hidden)
++            .huskHideScrollIndicators()
+             .fullScreenCover(item: Binding(get: { shown.map(ShownPicture.init) }, set: { shown = $0?.path })) { picture in
+                 ZStack(alignment: .topTrailing) {
+                     Color.black.ignoresSafeArea()
+diff --git a/src/app/Husk/TLAppSettings.swift b/src/app/Husk/TLAppSettings.swift
+index 911a033..9052729 100644
+--- a/src/app/Husk/TLAppSettings.swift
++++ b/src/app/Husk/TLAppSettings.swift
+@@ -302,7 +302,7 @@ struct TLAppSettingsView: View {
+         case .working(let what):
+             HStack(spacing: 10) { ProgressView(); Text(what).foregroundStyle(.secondary) }
+         case .ready(let version):
+-            LabeledContent("Geode", value: "v\(version), ready")
++            HuskLabeledContent("Geode", value: "v\(version), ready")
+         case .failed(let why):
+             VStack(alignment: .leading, spacing: 6) {
+                 Text(why).font(.footnote).foregroundStyle(.orange)
+diff --git a/src/app/Husk/TLUnityView.swift b/src/app/Husk/TLUnityView.swift
+index 9993e0b..3b9e5d3 100644
+--- a/src/app/Husk/TLUnityView.swift
++++ b/src/app/Husk/TLUnityView.swift
+@@ -784,9 +784,9 @@ struct TLCocosAttemptView: View {
+             }
+         }
+         .statusBarHidden(true)
+-        .persistentSystemOverlays(.hidden)
++        .huskHideSystemOverlays()
+         // Swipes near the edges are the game's.
+-        .defersSystemGestures(on: .all)
++        .huskDeferSystemGestures()
+         .onAppear {
+             HuskOrientation.set(portrait ? .portrait : .landscape)
+             UIApplication.shared.isIdleTimerDisabled = settings.keepAwake
+@@ -886,7 +886,7 @@ struct TLCocosAttemptView: View {
+                 Text(stats).font(.technical(11)).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
+             }
+             if devInfo {
+-                Button { withAnimation(.snappy(duration: 0.25)) { showLog.toggle() } } label: {
++                Button { withAnimation(.huskSnappy(duration: 0.25)) { showLog.toggle() } } label: {
+                     Text(showLog ? "Hide log" : "Log").font(.system(size: 12, weight: .semibold))
+                 }
+                 .tint(.white)
+diff --git a/src/app/Husk/TechnicalDetails.swift b/src/app/Husk/TechnicalDetails.swift
+index b813889..c99f19e 100644
+--- a/src/app/Husk/TechnicalDetails.swift
++++ b/src/app/Husk/TechnicalDetails.swift
+@@ -138,7 +138,7 @@ struct TLTechnicalView: View {
+     }
+ 
+     private func row(_ label: String, _ value: String, mono: Bool = false) -> some View {
+-        LabeledContent {
++        HuskLabeledContent {
+             Text(value)
+                 .font(mono ? .system(.footnote, design: .monospaced) : .body)
+                 .multilineTextAlignment(.trailing)
+diff --git a/src/app/Husk/TranslationLayer.swift b/src/app/Husk/TranslationLayer.swift
+index 3e1b844..262062e 100644
+--- a/src/app/Husk/TranslationLayer.swift
++++ b/src/app/Husk/TranslationLayer.swift
+@@ -832,8 +832,8 @@ struct TLClassicAttemptView: View {
+             }
+         }
+         .statusBarHidden(true)
+-        .persistentSystemOverlays(.hidden)
+-        .defersSystemGestures(on: .all)
++        .huskHideSystemOverlays()
++        .huskDeferSystemGestures()
+         .onAppear {
+             HuskOrientation.set(portrait ? .portrait : .landscape)
+             UIApplication.shared.isIdleTimerDisabled = settings.keepAwake
+@@ -860,7 +860,7 @@ struct TLClassicAttemptView: View {
+                 .font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.85)).lineLimit(1)
+             Spacer()
+             if devInfo {
+-                Button { withAnimation(.snappy(duration: 0.25)) { showLog.toggle() } } label: {
++                Button { withAnimation(.huskSnappy(duration: 0.25)) { showLog.toggle() } } label: {
+                     Text(showLog ? "Hide log" : "Log").font(.system(size: 12, weight: .semibold))
+                 }
+                 .tint(.white)
+diff --git a/src/app/project.yml b/src/app/project.yml
+index 97bc417..480e5ce 100644
+--- a/src/app/project.yml
++++ b/src/app/project.yml
+@@ -2,26 +2,29 @@ name: Husk
+ options:
+   bundleIdPrefix: com.husk
+   deploymentTarget:
+-    # 16.0: the lowest the app builds at as written (its SwiftUI is iOS 16), so
+-    # it installs on the iOS 16 versions TrollStore runs on. QEMU, ANGLE and
+-    # rppairing are built for 15.5, below it.
+-    iOS: "16.0"
++    # iOS 15 backport; build with a modern SDK, deploy to 15.6.
++    iOS: "15.6"
+   createIntermediateGroups: true
+ 
++packages:
++  NavigationBackport:
++    url: https://github.com/johnpatrickmorgan/NavigationBackport.git
++    revision: 899836da374f44954a4b7ff5e6d16fd83b32aae5
++
+ settings:
+   base:
+-    # The app and its JIT helper extension follow this together: the helper's
+-    # identifier has to sit under the app's. Change this, not
+-    # PRODUCT_BUNDLE_IDENTIFIER.
++    # Change the app identifier here; xcodegen regenerates the project.
+     HUSK_BUNDLE_IDENTIFIER: com.husk.app
+     # The app's entitlements only. A signed development build has to drop
+     # dynamic-codesigning, which Apple will not provision; overriding this
+-    # rather than CODE_SIGN_ENTITLEMENTS keeps the override off the helper.
++    # rather than editing the source entitlement file preserves packaging defaults.
+     HUSK_ENTITLEMENTS: Husk/Husk.entitlements
+     ARCHS: arm64
+     ONLY_ACTIVE_ARCH: YES
+     ENABLE_BITCODE: NO
+     SWIFT_VERSION: "5.0"
++    SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) HUSK_IOS15"
++    CLANG_WARN_UNGUARDED_AVAILABILITY: YES_AGGRESSIVE
+     # The guest framebuffer path is latency-sensitive and the JIT path is
+     # timing-sensitive; never let a debug build of the display loop mislead us.
+     SWIFT_OPTIMIZATION_LEVEL: "-O"
+@@ -50,8 +53,6 @@ targets:
+           - "husk-tl-unity-app.h"
+       # The messages the app and its JIT helper exchange.
+       - path: HuskJITHelper/HuskJITMessages.swift
+-      # The download Live Activity's attributes, shared with the widget that draws it.
+-      - path: Shared
+     settings:
+       base:
+         PRODUCT_BUNDLE_IDENTIFIER: $(HUSK_BUNDLE_IDENTIFIER)
+@@ -118,10 +119,7 @@ targets:
+           # On-device pairing for Built-in StikJIT, built by scripts/build_rppairing_ios.sh.
+           - "-lhusk_rppairing"
+     dependencies:
+-      # Built-in StikJIT's debugger process. Embedded into PlugIns/.
+-      - target: HuskJITHelper
+-      # The download Live Activity (Lock Screen and Dynamic Island). Embedded into PlugIns/.
+-      - target: HuskDownloadsWidget
++      - package: NavigationBackport
+       # Built by scripts/build_ios.sh. Embedded and signed into the bundle.
+       - framework: ../../build/ios-arm64/lib/libqemu-aarch64-softmmu.dylib
+         embed: true
+@@ -220,83 +218,3 @@ targets:
+           - "$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/edk2-aarch64-code.fd"
+           - "$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/lineage-efi-vars-seed.fd"
+           - "$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/lineage-vdb-seed.qcow2"
+-
+-    postBuildScripts:
+-      - name: Embed StikJIT
+-        # The helper links StikJIT; it lives here, in the app's Frameworks,
+-        # because sideloaders re-sign frameworks there and left one inside the
+-        # helper unsigned. Upstream's framework has no Info.plist, and installd
+-        # refuses an embedded framework without one. Copy it in with a minimal
+-        # plist rather than editing the vendored bundle, then sign it as the
+-        # copy phase would.
+-        script: |
+-          set -e
+-          SRC="$SRCROOT/Frameworks/StikJIT.xcframework/ios-arm64/StikJIT.framework"
+-          DST="$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/StikJIT.framework"
+-          rm -rf "$DST"
+-          mkdir -p "$(dirname "$DST")"
+-          ditto "$SRC" "$DST"
+-          rm -rf "$DST/Headers" "$DST/Modules"
+-          PLIST="$DST/Info.plist"
+-          if [ ! -f "$PLIST" ]; then
+-            plutil -create xml1 "$PLIST"
+-            plutil -insert CFBundleIdentifier -string "$PRODUCT_BUNDLE_IDENTIFIER.StikJIT" "$PLIST"
+-            plutil -insert CFBundleExecutable -string StikJIT "$PLIST"
+-            plutil -insert CFBundleName -string StikJIT "$PLIST"
+-            plutil -insert CFBundlePackageType -string FMWK "$PLIST"
+-            plutil -insert CFBundleInfoDictionaryVersion -string 6.0 "$PLIST"
+-            plutil -insert CFBundleShortVersionString -string 1.9.0 "$PLIST"
+-            plutil -insert CFBundleVersion -string 1.9.0 "$PLIST"
+-            plutil -insert MinimumOSVersion -string 17.4 "$PLIST"
+-            plutil -insert CFBundleSupportedPlatforms -array "$PLIST"
+-            plutil -insert CFBundleSupportedPlatforms.0 -string iPhoneOS "$PLIST"
+-          fi
+-          if [ -n "$EXPANDED_CODE_SIGN_IDENTITY" ] && [ "$CODE_SIGNING_ALLOWED" != "NO" ]; then
+-            codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" --timestamp=none "$DST"
+-          fi
+-        basedOnDependencyAnalysis: false
+-
+-  # Built-in StikJIT's debugger (docs/06-built-in-jit.md). A process cannot
+-  # synchronously debug itself, so StikJIT runs here and attaches to the app.
+-  # iOS 26 only: the app falls back to StikDebug below that.
+-  HuskJITHelper:
+-    type: app-extension
+-    platform: iOS
+-    deploymentTarget: "26.0"
+-    sources:
+-      - path: HuskJITHelper
+-    settings:
+-      base:
+-        PRODUCT_BUNDLE_IDENTIFIER: $(HUSK_BUNDLE_IDENTIFIER).JITHelper
+-        INFOPLIST_FILE: HuskJITHelper/Info.plist
+-        GENERATE_INFOPLIST_FILE: NO
+-        APPLICATION_EXTENSION_API_ONLY: YES
+-        CODE_SIGN_STYLE: Automatic
+-        TARGETED_DEVICE_FAMILY: "1,2"
+-        # StikJIT.framework, in the app's Frameworks (the app target's Embed StikJIT).
+-        LD_RUNPATH_SEARCH_PATHS:
+-          - "$(inherited)"
+-          - "@executable_path/../../Frameworks"
+-    dependencies:
+-      # StikJIT 1.9.0 (MPL-2.0, with idevice under MIT), from
+-      # github.com/StikDebug/StikJIT/releases/tag/1.9.0, unmodified. Linked
+-      # here and embedded by the app target's Embed StikJIT.
+-      - framework: Frameworks/StikJIT.xcframework
+-        embed: false
+-
+-  # Draws the Live Activity a download shows (Downloads.swift starts and updates it). Live Activities are iOS 16.1.
+-  HuskDownloadsWidget:
+-    type: app-extension
+-    platform: iOS
+-    deploymentTarget: "16.1"
+-    sources:
+-      - path: HuskDownloadsWidget
+-      - path: Shared
+-    settings:
+-      base:
+-        PRODUCT_BUNDLE_IDENTIFIER: $(HUSK_BUNDLE_IDENTIFIER).Downloads
+-        INFOPLIST_FILE: HuskDownloadsWidget/Info.plist
+-        GENERATE_INFOPLIST_FILE: NO
+-        APPLICATION_EXTENSION_API_ONLY: YES
+-        CODE_SIGN_STYLE: Automatic
+-        TARGETED_DEVICE_FAMILY: "1"
+diff --git a/tests/test_ios15_bundle.py b/tests/test_ios15_bundle.py
+new file mode 100644
+index 0000000..20d4f74
+--- /dev/null
++++ b/tests/test_ios15_bundle.py
+@@ -0,0 +1,76 @@
++import plistlib
++import struct
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
++from audit_ios15_bundle import audit
++
++
++def macho(minos=0x0F0600, platform=2, cpu=0x100000C, library=None, weak=False):
++    commands = struct.pack("<6I", 0x32, 24, platform, minos, 0x1A0000, 0)
++    count = 1
++    if library:
++        name = library.encode() + b"\0"
++        size = (24 + len(name) + 7) & ~7
++        commands += struct.pack("<6I", 0x80000018 if weak else 0xC, size, 24, 0, 0, 0)
++        commands += name.ljust(size - 24, b"\0")
++        count += 1
++    return struct.pack("<8I", 0xFEEDFACF, cpu, 0, 2, count, len(commands), 0, 0) + commands
++
++
++class BundleCompatibilityTests(unittest.TestCase):
++    def setUp(self):
++        self.temp = tempfile.TemporaryDirectory()
++        self.addCleanup(self.temp.cleanup)
++        self.app = Path(self.temp.name) / "Husk.app"
++        self.app.mkdir()
++        (self.app / "Info.plist").write_bytes(plistlib.dumps({
++            "CFBundleExecutable": "Husk", "MinimumOSVersion": "15.6"}))
++        (self.app / "Husk").write_bytes(macho())
++
++    def test_modern_sdk_is_allowed_with_old_deployment_target(self):
++        self.assertEqual(audit(self.app), [])
++
++    def test_embedded_dylib_cannot_require_ios16(self):
++        (self.app / "new.dylib").write_bytes(macho(minos=0x100000))
++        self.assertTrue(any("new.dylib" in e for e in audit(self.app)))
++
++    def test_simulator_arm64_is_not_a_device_binary(self):
++        (self.app / "Husk").write_bytes(macho(platform=7))
++        self.assertTrue(any("platform/minOS" in e for e in audit(self.app)))
++
++    def test_x86_is_not_arm64(self):
++        (self.app / "Husk").write_bytes(macho(cpu=0x1000007))
++        self.assertTrue(any("arm64" in e for e in audit(self.app)))
++
++    def test_stale_extensions_fail_even_without_code(self):
++        (self.app / "PlugIns/HuskJITHelper.appex").mkdir(parents=True)
++        self.assertTrue(any("unsupported component" in e for e in audit(self.app)))
++
++    def test_new_framework_must_be_weak_linked(self):
++        path = "/System/Library/Frameworks/ActivityKit.framework/ActivityKit"
++        (self.app / "Husk").write_bytes(macho(library=path))
++        self.assertTrue(any("strong link" in e for e in audit(self.app)))
++        (self.app / "Husk").write_bytes(macho(library=path, weak=True))
++        self.assertEqual(audit(self.app), [])
++
++    def test_truncated_macho_fails(self):
++        (self.app / "Husk").write_bytes(macho()[:35])
++        self.assertTrue(any("malformed" in e for e in audit(self.app)))
++
++    def test_framework_plist_cannot_require_newer_os(self):
++        framework = self.app / "Frameworks/New.framework"
++        framework.mkdir(parents=True)
++        (framework / "Info.plist").write_bytes(plistlib.dumps({"MinimumOSVersion": "16.0"}))
++        self.assertTrue(any("New.framework" in e for e in audit(self.app)))
++
++    def test_missing_main_executable_fails(self):
++        (self.app / "Husk").unlink()
++        self.assertTrue(any("main executable missing" in e for e in audit(self.app)))
++
++
++if __name__ == "__main__":
++    unittest.main()

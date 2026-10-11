@@ -2,7 +2,7 @@ name: Test Android with 1 GiB guest RAM
 on:
   workflow_dispatch:
   push:
-    paths: [.github/workflows/test-lowram-android.yml]
+    paths: [.github/workflows/test-lowram-android.yml, lowram_guest.py]
 permissions:
   contents: read
 jobs:

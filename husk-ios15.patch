@@ -53,29 +53,40 @@ index 73eed07..9c2d821 100644
 +__pycache__/
 +*.pyc
 diff --git a/README.md b/README.md
-index 66c6d9b..8d3b8e2 100644
+index 66c6d9b..d1dbe5c 100644
 --- a/README.md
 +++ b/README.md
-@@ -1,5 +1,18 @@
+@@ -1,5 +1,29 @@
  # Husk
  
-+**Experimental iOS 15.6 backport.** This branch adapts upstream commit
-+`6b59e21dbe6ac7013f237c149f995c231a05900b` for iPhone 12 mini / iOS 15.6.1.
-+IPA and TIPA were built with Xcode 26.6 in
-+[GitHub Actions](https://github.com/toxicdevwork-rgb/Husk-iOS15/actions/runs/38151341187).
-+[Download the build artifact](https://github.com/toxicdevwork-rgb/Husk-iOS15/actions/runs/38151341187/artifacts/11706817512).
-+All five bundled Mach-O files passed arm64/iOS <= 15.6.1 metadata checks.
-+Installation, JIT and games still require testing on the device.
-+The published fork stores changes in `husk-ios15.patch`; CI applies that patch
-+to the pinned upstream commit before compiling. The source files shown in the
-+fork are the upstream baseline, not the patched build checkout.
++**Experimental iOS 15.6 backport with Russian UI.** Targets iPhone 12 mini,
++iOS 15.6.1 and Dopamine/TrollStore, based on upstream `6b59e21dbe6ac7013f237c149f995c231a05900b`.
++
++[Build 8 — successful GitHub Actions build](https://github.com/toxicdevwork-rgb/Husk-iOS15/actions/runs/38165267807)
++· [Download IPA / TIPA](https://github.com/toxicdevwork-rgb/Husk-iOS15/actions/runs/38165267807/artifacts/11712386304).
++For TrollStore, use `Husk-iOS15.tipa` from the artifact ZIP.
++
++This update includes the previously missing Java/Android runtime resources,
++358 Russian interface entries with an English switch, shared-JIT ownership checks,
++and Android boot diagnostics. The build validates both binary compatibility and
++runtime resources before packaging. An additional workflow inspects the published archives.
++
++The previous build opened on the device and passed the JIT self-test, but Discord
++failed on missing Java resources and Android did not complete booting. **Discord
++compatibility and Android boot after these fixes still require device testing.**
++Disable Android autostart and restart Husk before testing Translation Layer.
++For Android on the 12 mini, select CPU rendering and leave at least 3 GB free for
++the RAM file. Switching runtimes requires restarting Husk because they share JIT memory.
++
++The fork stores changes in `husk-ios15.patch`; CI applies it to the pinned upstream
++commit. The source tree shown on GitHub is the upstream baseline.
 +See [port status and build instructions](docs/07-ios15-port.md).
 +Built-in StikJIT and Live Activities are omitted from this distribution.
 +
  <p align="center">
    <a href="https://trendshift.io/repositories/233057?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-233057" target="_blank" rel="noopener noreferrer">
      <img src="https://trendshift.io/api/badge/trendshift/repositories/233057/daily?language=Swift" alt="Leviidev/Husk | Trendshift" width="250" height="55"/>
-@@ -97,7 +110,8 @@ SideStore, AltStore or TrollStore. It is one IPA for all of them: it carries
+@@ -97,7 +121,8 @@ SideStore, AltStore or TrollStore. It is one IPA for all of them: it carries
  Husk's entitlements, which TrollStore keeps, and a sideloader re-signs it with
  your own.
  
@@ -87,26 +98,33 @@ index 66c6d9b..8d3b8e2 100644
  
 diff --git a/docs/07-ios15-port.md b/docs/07-ios15-port.md
 new file mode 100644
-index 0000000..e0b419b
+index 0000000..a0dd457
 --- /dev/null
 +++ b/docs/07-ios15-port.md
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,131 @@
 +# Порт Husk на iOS 15.6.1: состояние
 +
 +Цель: iPhone 12 mini, A14, iOS 15.6.1, Dopamine/TrollStore.
 +Основа: [Leviidev/Husk, 6b59e21](https://github.com/Leviidev/Husk/tree/6b59e21dbe6ac7013f237c149f995c231a05900b).
 +Локальная ветка: `codex/ios15-backport`.
 +
-+**IPA и TIPA собраны через GitHub Actions; работа на iPhone ещё не проверена.**
-+[Сборка №4](https://github.com/toxicdevwork-rgb/Husk-iOS15/actions/runs/38151341187)
-+скомпилировала и упаковала приложение с Xcode 26.6 на macOS Intel runner.
-+QEMU, ANGLE, libepoxy, virglrenderer, MoltenVK и Rust-библиотека собраны из исходников.
-+Проверка всех пяти Mach-O в пакете прошла: arm64, iOS device, minOS <= 15.6.1.
-+[Архив IPA/TIPA](https://github.com/toxicdevwork-rgb/Husk-iOS15/actions/runs/38151341187/artifacts/11706817512)
-+также содержит логи, патч и SHA256SUMS.txt. Внутри архива пакеты лежат в
-+`Users/runner/work/Husk-iOS15/Husk-iOS15/husk/build/`.
-+На доступном Windows-хосте нет подключённого iPhone: установка, JIT и запуск
-+Android-приложений требуют отдельной проверки на устройстве.
++**Сборка №8 успешно создала IPA и TIPA через GitHub Actions.**
++[Результат](https://github.com/toxicdevwork-rgb/Husk-iOS15/actions/runs/38165267807)
++· [Архив с пакетами](https://github.com/toxicdevwork-rgb/Husk-iOS15/actions/runs/38165267807/artifacts/11712386304).
++
++В сборке исправлена упаковка Java/Android-ресурсов, добавлены 358 переводов,
++проверка совместного использования JIT, настройка памяти и диагностика загрузки.
++15 локальных проверок прошли; Java-рантайм собран в CI, комплектность проверяется
++до выдачи IPA. Для TrollStore используйте файл `Husk-iOS15.tipa`.
++
++На предыдущей сборке подтверждены открытие Husk и успешная проверка JIT на iPhone.
++**Работа Discord и загрузка Android после исправлений требуют повторного теста на устройстве.**
++Для Discord отключите автозапуск Android в настройках JIT и полностью перезапустите Husk.
++Для Android выберите CPU и освободите не менее 3 ГБ. Если загрузка не продвигается,
++откройте журнал кнопкой на экране запуска и сохраните все предлагаемые файлы журналов.
++
++Форк хранит изменения в `husk-ios15.patch`; workflow применяет их к закреплённому
++upstream commit. Исходники в корне GitHub — базовая версия, а не результат применения патча.
 +
 +## Что показала проверка исходников
 +
@@ -162,9 +180,10 @@ index 0000000..e0b419b
 +скрипты upstream пропускают уже собранные зависимости по наличию файлов/stamps.
 +
 +```sh
-+brew install meson ninja pkg-config xcodegen qemu
++brew install meson ninja pkg-config xcodegen qemu e2fsprogs openjdk@17
 +python3 -m venv .build-python
 +source .build-python/bin/activate
++export JAVA_HOME="$(brew --prefix openjdk@17)/libexec/openjdk.jdk/Contents/Home"
 +python -m pip install 'PyYAML==6.0.3' 'Mako==1.3.10'
 +rustup target add aarch64-apple-ios
 +python3 -m unittest discover -s tests -p 'test_ios15_*.py' -v
@@ -935,15 +954,38 @@ index 2ed1b1d..21aa95e 100644
              .disabled(!canOpen)
          } label: {
 diff --git a/src/app/Husk/AppDiagnosis.swift b/src/app/Husk/AppDiagnosis.swift
-index e2f9f1e..0115438 100644
+index e2f9f1e..826fc64 100644
 --- a/src/app/Husk/AppDiagnosis.swift
 +++ b/src/app/Husk/AppDiagnosis.swift
-@@ -240,10 +240,10 @@ struct AppStoppedOverlay: View {
+@@ -94,7 +94,7 @@ struct AppDiagnosis: Identifiable, Equatable {
+                                         + "that Husk does not provide yet, or does something iOS does not allow.",
+                                     evidence: head)
+             }
+-            return AppDiagnosis(kind: .nativeCrash, title: "The app crashed",
++            return AppDiagnosis(kind: .nativeCrash, title: L("The app crashed"),
+                                 detail: "It stopped with \(signal). The report has the full log of the run.", evidence: head)
+         }
+ 
+@@ -124,8 +124,8 @@ struct AppDiagnosis: Identifiable, Equatable {
+             if what.localizedCaseInsensitiveContains("google play services") || what.contains("GooglePlayServices") {
+                 return googleDiagnosis(l)
+             }
+-            return AppDiagnosis(kind: .javaCrash, title: "The app crashed",
+-                                detail: "Its code stopped with \(short)" + (firstPart.isEmpty ? "." : ": \(firstPart.prefix(220))"),
++            return AppDiagnosis(kind: .javaCrash, title: L("The app crashed"),
++                                detail: String(format: L("Its code stopped with %@"), short) + (firstPart.isEmpty ? "." : ": \(firstPart.prefix(220))"),
+                                 evidence: l)
+         }
+ 
+@@ -238,12 +238,12 @@ struct AppStoppedOverlay: View {
+             VStack(alignment: .leading, spacing: 14) {
+                 Text(app.label).font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
                  AppDiagnosisCard(diagnosis: diagnosis, showsEvidence: true)
-                 HStack(spacing: 10) {
+-                HStack(spacing: 10) {
++                VStack(spacing: 10) {
                      if let report {
 -                        ShareLink(item: report) { Label("Share Report", systemImage: "square.and.arrow.up").frame(maxWidth: .infinity) }
-+                        HuskShareLink(item: report) { Label(L("Share Report"), systemImage: "square.and.arrow.up").frame(maxWidth: .infinity) }
++                        HuskShareLink(item: report) { Label(L("Share Report"), systemImage: "square.and.arrow.up").font(.subheadline).lineLimit(1).minimumScaleFactor(0.8).frame(maxWidth: .infinity) }
                              .buttonStyle(.bordered)
                      }
 -                    Button(action: close) { Text("Close").frame(maxWidth: .infinity) }
@@ -3733,10 +3775,10 @@ index 98bcd0f..7c0754c 100644
          while HuskGLView.layerForGL == nil, Date() < deadline {
 diff --git a/src/app/Husk/Resources/en.lproj/Localizable.strings b/src/app/Husk/Resources/en.lproj/Localizable.strings
 new file mode 100644
-index 0000000..bea994b
+index 0000000..483ae52
 --- /dev/null
 +++ b/src/app/Husk/Resources/en.lproj/Localizable.strings
-@@ -0,0 +1,359 @@
+@@ -0,0 +1,362 @@
 +// Husk iOS 15 interface translations.
 +"1 pixel per point. Fastest." = "1 pixel per point. Fastest.";
 +"1.5 pixels per point." = "1.5 pixels per point.";
@@ -4096,6 +4138,9 @@ index 0000000..bea994b
 +"Install Husk.ipa through TrollStore, on an iOS version TrollStore supports. It carries the entitlements TrollStore keeps, so the same file works there and in a sideloader." = "Install Husk.ipa through TrollStore, on an iOS version TrollStore supports. It carries the entitlements TrollStore keeps, so the same file works there and in a sideloader.";
 +"In TrollStore's Settings, turn on URL Scheme. TrollStore ignores enable-jit requests without it." = "In TrollStore's Settings, turn on URL Scheme. TrollStore ignores enable-jit requests without it.";
 +"Whenever Android or a game starts, Husk asks TrollStore to enable JIT. TrollStore opens Husk, attaches to it for a moment and lets go, which leaves it allowed to run code it wrote." = "Whenever Android or a game starts, Husk asks TrollStore to enable JIT. TrollStore opens Husk, attaches to it for a moment and lets go, which leaves it allowed to run code it wrote.";
++
++"The app crashed" = "The app crashed";
++"Its code stopped with %@" = "Its code stopped with %@";
 diff --git a/src/app/Husk/Resources/legal/LICENSE-NavigationBackport-MIT.txt b/src/app/Husk/Resources/legal/LICENSE-NavigationBackport-MIT.txt
 new file mode 100644
 index 0000000..27c7225
@@ -4123,10 +4168,10 @@ index 0000000..27c7225
 +THE SOFTWARE.
 diff --git a/src/app/Husk/Resources/ru.lproj/Localizable.strings b/src/app/Husk/Resources/ru.lproj/Localizable.strings
 new file mode 100644
-index 0000000..31e2c13
+index 0000000..6e0d9a3
 --- /dev/null
 +++ b/src/app/Husk/Resources/ru.lproj/Localizable.strings
-@@ -0,0 +1,359 @@
+@@ -0,0 +1,362 @@
 +// Husk iOS 15 interface translations.
 +"1 pixel per point. Fastest." = "1 пиксель на точку. Самый быстрый вариант.";
 +"1.5 pixels per point." = "1,5 пикселя на точку.";
@@ -4486,6 +4531,9 @@ index 0000000..31e2c13
 +"Install Husk.ipa through TrollStore, on an iOS version TrollStore supports. It carries the entitlements TrollStore keeps, so the same file works there and in a sideloader." = "Установите Husk-iOS15.tipa через TrollStore на поддерживаемой версии iOS. Этот пакет подготовлен для установки через TrollStore.";
 +"In TrollStore's Settings, turn on URL Scheme. TrollStore ignores enable-jit requests without it." = "В настройках TrollStore включите URL Scheme. Без этой настройки TrollStore игнорирует запросы на включение JIT.";
 +"Whenever Android or a game starts, Husk asks TrollStore to enable JIT. TrollStore opens Husk, attaches to it for a moment and lets go, which leaves it allowed to run code it wrote." = "При запуске Android или приложения Husk запрашивает включение JIT через TrollStore. Краткое подключение отладчика даёт Husk право выполнять сгенерированный код.";
++
++"The app crashed" = "Приложение завершилось с ошибкой";
++"Its code stopped with %@" = "Ошибка выполнения: %@";
 diff --git a/src/app/Husk/RuntimeSession.swift b/src/app/Husk/RuntimeSession.swift
 new file mode 100644
 index 0000000..7b67767
@@ -5414,7 +5462,7 @@ index 911a033..9295b76 100644
          }
      }
 diff --git a/src/app/Husk/TLUnityView.swift b/src/app/Husk/TLUnityView.swift
-index 9993e0b..ec823fb 100644
+index 9993e0b..9e01073 100644
 --- a/src/app/Husk/TLUnityView.swift
 +++ b/src/app/Husk/TLUnityView.swift
 @@ -196,7 +196,7 @@ final class TLUnityUIView: UIView, UIKeyInput {
@@ -5561,7 +5609,7 @@ index 9993e0b..ec823fb 100644
          HStack(spacing: 12) {
              Button { dismiss() } label: {
 -                Label("Close", systemImage: "xmark").font(.system(size: 13, weight: .semibold))
-+                Label(L("Close"), systemImage: "xmark").font(.system(size: 13, weight: .semibold))
++                Image(systemName: "xmark").font(.system(size: 13, weight: .semibold)).frame(width: 36, height: 30).accessibilityLabel(L("Close"))
              }
              .tint(.white)
              if engine == .flutter {
@@ -5599,7 +5647,7 @@ index 9993e0b..ec823fb 100644
              }
              Button { toggleInterface() } label: {
 -                Label("Hide", systemImage: "eye.slash").font(.system(size: 12, weight: .semibold))
-+                Label(L("Hide"), systemImage: "eye.slash").font(.system(size: 12, weight: .semibold))
++                Image(systemName: "eye.slash").font(.system(size: 12, weight: .semibold)).frame(width: 36, height: 30).accessibilityLabel(L("Hide"))
              }
              .tint(.white)
          }
@@ -5921,10 +5969,10 @@ index 97bc417..d3c924d 100644
 -        CODE_SIGN_STYLE: Automatic
 -        TARGETED_DEVICE_FAMILY: "1"
 diff --git a/src/java-framework/build.sh b/src/java-framework/build.sh
-index df636d6..b34c438 100755
+index df636d6..b136190 100755
 --- a/src/java-framework/build.sh
 +++ b/src/java-framework/build.sh
-@@ -2,10 +2,11 @@
+@@ -2,16 +2,20 @@
  # build.sh <out.dex> -- Husk's Java framework (android.* for apps run on Husk's Dalvik runtime): javac, then d8.
  set -e
  HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -5938,6 +5986,224 @@ index df636d6..b34c438 100755
  python3 "$HERE/gen/gles20.py" "$HERE/src/android/opengl" "$HERE/../translation-layer-next/husk-tl-dvm-gles20.c" >/dev/null
  # libcore's own classes that javac's JDK does not have (org.xmlpull): compiled to build against, not put in the dex
  "$JDK/bin/javac" -nowarn --release 8 -encoding UTF-8 -d "$TMP/stubs" $(find "$HERE/stubs" -name '*.java')
+ if ! "$JDK/bin/javac" -nowarn --release 8 -encoding UTF-8 -Xmaxerrs 100000 -cp "$TMP/stubs" -d "$TMP/classes" $(find "$HERE/src" "$HERE/gen-src" -name '*.java') 2> "$TMP/javac.log"; then
+     grep -v "^Note:" "$TMP/javac.log" > "${JAVAC_LOG:-/dev/stderr}"; echo "javac failed" >&2; exit 1
+ fi
++# Exercise Java API contracts used by Fresco before producing the device dex.
++"$JDK/bin/javac" --release 8 -encoding UTF-8 -cp "$TMP/classes" -d "$TMP/tests" "$HERE/../../tests/java/husk/Gfx.java" "$HERE/../../tests/java/ImageCompatibilityTest.java"
++"$JDK/bin/java" -cp "$TMP/tests:$TMP/classes" ImageCompatibilityTest
+ (cd "$TMP/classes" && "$JDK/bin/jar" cf "$TMP/classes.jar" .)
+ "$JDK/bin/java" -cp "$D8" com.android.tools.r8.D8 --min-api 26 --output "$TMP" "$TMP/classes.jar"
+ mkdir -p "$(dirname "$OUT")"
+diff --git a/src/java-framework/src/android/graphics/Bitmap.java b/src/java-framework/src/android/graphics/Bitmap.java
+index 8708d9c..1aa2ab0 100644
+--- a/src/java-framework/src/android/graphics/Bitmap.java
++++ b/src/java-framework/src/android/graphics/Bitmap.java
+@@ -18,12 +18,13 @@ public final class Bitmap implements android.os.Parcelable {
+ 
+     private long mNative;
+     private int mWidth, mHeight;
++    private int mAllocationBytes;
+     private Config mConfig;
+     private boolean mMutable, mRecycled, mHasAlpha = true, mPremultiplied = true;
+     private int mDensity = android.util.DisplayMetrics.DENSITY_DEVICE_STABLE;
+     private int mGeneration;
+ 
+-    Bitmap(long nat, int w, int h, Config c, boolean mutable) { mNative = nat; mWidth = w; mHeight = h; mConfig = c == null ? Config.ARGB_8888 : c; mMutable = mutable; }
++    Bitmap(long nat, int w, int h, Config c, boolean mutable) { mNative = nat; mWidth = w; mHeight = h; mAllocationBytes = w * h * 4; mConfig = c == null ? Config.ARGB_8888 : c; mMutable = mutable; }
+     /** The native bitmap. */
+     public long huskNative() { return mNative; }
+     /** Changes each time it is drawn into, for caches. */
+@@ -105,12 +106,24 @@ public final class Bitmap implements android.os.Parcelable {
+     public int getScaledHeight(android.util.DisplayMetrics m) { return getScaledHeight(m.densityDpi); }
+     public final int getRowBytes() { return mWidth * 4; }
+     public final int getByteCount() { return mWidth * mHeight * 4; }
+-    public final int getAllocationByteCount() { return getByteCount(); }
++    public final int getAllocationByteCount() { return mAllocationBytes; }
+     public ColorSpace getColorSpace() { return ColorSpace.get(ColorSpace.Named.SRGB); }
+     public void setConfig(Config c) { mConfig = c; }
+-    public void reconfigure(int w, int h, Config c) {}
+-    public void setWidth(int w) {}
+-    public void setHeight(int h) {}
++    public void reconfigure(int w, int h, Config c) {
++        if (mRecycled || !mMutable) throw new IllegalStateException("Bitmap must be mutable and not recycled");
++        if (w <= 0 || h <= 0 || (long) w * h * 4 > mAllocationBytes || c == Config.HARDWARE)
++            throw new IllegalArgumentException("Bitmap allocation is too small or config is unsupported");
++        if (!husk.Gfx.bmReconfigure(mNative, w, h)) throw new IllegalArgumentException("Cannot reconfigure bitmap");
++        mWidth = w; mHeight = h; mConfig = c == null ? Config.ARGB_8888 : c; mGeneration++;
++    }
++    public void setWidth(int w) { reconfigure(w, mHeight, mConfig); }
++    public void setHeight(int h) { reconfigure(mWidth, h, mConfig); }
++    void huskReuse(Bitmap decoded) {
++        reconfigure(decoded.mWidth, decoded.mHeight, decoded.mConfig);
++        husk.Gfx.bmAssign(mNative, decoded.mNative);
++        mDensity = decoded.mDensity; mHasAlpha = decoded.mHasAlpha;
++        mPremultiplied = decoded.mPremultiplied;
++    }
+     public void prepareToDraw() {}
+     public boolean sameAs(Bitmap o) { if (o == null || o.mWidth != mWidth || o.mHeight != mHeight) return false; int[] a = new int[mWidth * mHeight], b = new int[a.length]; getPixels(a, 0, mWidth, 0, 0, mWidth, mHeight); o.getPixels(b, 0, mWidth, 0, 0, mWidth, mHeight); return java.util.Arrays.equals(a, b); }
+ 
+diff --git a/src/java-framework/src/android/graphics/BitmapFactory.java b/src/java-framework/src/android/graphics/BitmapFactory.java
+index 3b9a794..b0ce4c9 100644
+--- a/src/java-framework/src/android/graphics/BitmapFactory.java
++++ b/src/java-framework/src/android/graphics/BitmapFactory.java
+@@ -49,6 +49,13 @@ public class BitmapFactory {
+                 o.outWidth = b.getWidth(); o.outHeight = b.getHeight();
+             }
+         }
++        // Fresco requires decode(..., inBitmap) to return that exact object.
++        // Ignoring it causes rejected images and breaks the bitmap pool's accounting.
++        if (o != null && o.inBitmap != null) {
++            Bitmap reused = o.inBitmap;
++            try { reused.huskReuse(b); } finally { b.recycle(); }
++            return reused;
++        }
+         return b;
+     }
+     public static Bitmap decodeByteArray(byte[] data, int offset, int length) { return decodeByteArray(data, offset, length, null); }
+diff --git a/src/java-framework/src/android/net/Uri.java b/src/java-framework/src/android/net/Uri.java
+index a5aa845..b9b5e51 100644
+--- a/src/java-framework/src/android/net/Uri.java
++++ b/src/java-framework/src/android/net/Uri.java
+@@ -203,7 +203,9 @@ public abstract class Uri implements Comparable<Uri>, android.os.Parcelable {
+             if (opaque != null) b.append(opaque);
+             else {
+                 if (authority != null) b.append("//").append(authority);
+-                if (path != null && !path.isEmpty()) { if (authority != null && !path.startsWith("/")) b.append('/'); b.append(path); }
++                // A scheme also requires an absolute path. Fresco builds res:/123
++                // this way; res:123 is opaque and getPath() would return null.
++                if (path != null && !path.isEmpty()) { if ((scheme != null || authority != null) && !path.startsWith("/")) b.append('/'); b.append(path); }
+                 if (query != null) b.append('?').append(query);
+             }
+             if (fragment != null) b.append('#').append(fragment);
+diff --git a/src/java-framework/src/husk/Gfx.java b/src/java-framework/src/husk/Gfx.java
+index 00670fd..107015e 100644
+--- a/src/java-framework/src/husk/Gfx.java
++++ b/src/java-framework/src/husk/Gfx.java
+@@ -5,6 +5,8 @@ public final class Gfx {
+     private Gfx() {}
+     public static native long bmNew(int w, int h);
+     public static native void bmFree(long bm);
++    public static native boolean bmReconfigure(long bm, int w, int h);
++    public static native void bmAssign(long target, long source);
+     public static native void bmErase(long bm, int argb);
+     public static native int bmGetPixel(long bm, int x, int y);
+     public static native void bmSetPixel(long bm, int x, int y, int argb);
+diff --git a/src/translation-layer-next/husk-tl-dvm-graphics.c b/src/translation-layer-next/husk-tl-dvm-graphics.c
+index 661cbad..9f60a77 100644
+--- a/src/translation-layer-next/husk-tl-dvm-graphics.c
++++ b/src/translation-layer-next/husk-tl-dvm-graphics.c
+@@ -49,6 +49,7 @@ static const int32_t *paint_of(jobj *a)
+ typedef struct gbitmap {
+     int w, h;
+     size_t stride;
++    size_t capacity;
+     uint8_t *px;
+     CGContextRef ctx;               /* drawn into by a Canvas; also how its pixels become a CGImage */
+ } gbitmap;
+@@ -65,7 +66,8 @@ static gbitmap *bm_new(int w, int h)
+     if (w <= 0 || h <= 0 || (int64_t)w * h > (1ll << 28)) return NULL;
+     gbitmap *b = calloc(1, sizeof(*b));
+     b->w = w; b->h = h; b->stride = (size_t)w * 4;
+-    b->px = calloc((size_t)h, b->stride);
++    b->capacity = (size_t)h * b->stride;
++    b->px = calloc(1, b->capacity);
+     if (!b->px) { free(b); return NULL; }
+     b->ctx = CGBitmapContextCreate(b->px, (size_t)w, (size_t)h, 8, b->stride, rgb(), kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+     if (!b->ctx) { free(b->px); free(b); return NULL; }
+@@ -749,6 +751,29 @@ static uint32_t arr_len(jobj *x) { return x && x->kind == TL_K_PRIM_ARRAY ? x->a
+ /* ---- Bitmap */
+ NAT(G_bmNew) { (void)self; *ret = J((int64_t)(uintptr_t)bm_new(a[0].i, a[1].i)); return true; }
+ NAT(G_bmFree) { (void)self; (void)ret; bm_free(H(gbitmap, 0)); return true; }
++NAT(G_bmReconfigure)
++{
++    (void)self;
++    gbitmap *b = H(gbitmap, 0);
++    int w = a[1].i, h = a[2].i;
++    *ret = (jvalue){ .z = false };
++    if (!b || w <= 0 || h <= 0 || (uint64_t)w * h * 4 > b->capacity) return true;
++    CGContextRef ctx = CGBitmapContextCreate(b->px, w, h, 8, (size_t)w * 4,
++        rgb(), kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
++    if (!ctx) return true;
++    CGContextRelease(b->ctx);
++    b->ctx = ctx; b->w = w; b->h = h; b->stride = (size_t)w * 4;
++    *ret = (jvalue){ .z = true };
++    return true;
++}
++NAT(G_bmAssign)
++{
++    (void)self; (void)ret;
++    gbitmap *dst = H(gbitmap, 0), *src = H(gbitmap, 1);
++    if (dst && src && dst->w == src->w && dst->h == src->h)
++        memcpy(dst->px, src->px, src->stride * src->h);
++    return true;
++}
+ NAT(G_bmErase)
+ {
+     (void)self; (void)ret;
+@@ -1465,6 +1490,8 @@ bool tl_ui_has_frame(void) { return atomic_load(&S.any); }
+ static const struct { const char *name, *sig; dvm_native_fn fn; } k_gfx[] = {
+     { "bmNew", "(II)J", G_bmNew },
+     { "bmFree", "(J)V", G_bmFree },
++    { "bmReconfigure", "(JII)Z", G_bmReconfigure },
++    { "bmAssign", "(JJ)V", G_bmAssign },
+     { "bmErase", "(JI)V", G_bmErase },
+     { "bmGetPixel", "(JII)I", G_bmGetPixel },
+     { "bmSetPixel", "(JIII)V", G_bmSetPixel },
+diff --git a/tests/java/ImageCompatibilityTest.java b/tests/java/ImageCompatibilityTest.java
+new file mode 100644
+index 0000000..13bd6c5
+--- /dev/null
++++ b/tests/java/ImageCompatibilityTest.java
+@@ -0,0 +1,29 @@
++import android.net.Uri;
++import android.graphics.Bitmap;
++import android.graphics.BitmapFactory;
++public final class ImageCompatibilityTest {
++    private static void check(boolean ok,String message) { if(!ok) throw new AssertionError(message); }
++    public static void main(String[] args) {
++        Uri res=new Uri.Builder().scheme("res").path("2131230890").build();
++        check(res.toString().equals("res:/2131230890"),"resource URL must be hierarchical");
++        check(res.getPath().equals("/2131230890"),"Fresco's resource path must not be null");
++        check(Uri.parse("mailto:user@example.com").getPath()==null,"opaque URI still has no path");
++        check(new Uri.Builder().path("relative").build().toString().equals("relative"),"relative path");
++        check(new Uri.Builder().scheme("https").authority("example.com").path("a b").build().toString().equals("https://example.com/a%20b"),"encoded URL");
++        Bitmap pool=Bitmap.createBitmap(32,32,Bitmap.Config.ARGB_8888);
++        int capacity=pool.getAllocationByteCount();
++        pool.reconfigure(16,16,Bitmap.Config.ARGB_8888);
++        check(pool.getWidth()==16 && pool.getByteCount()==1024,"reconfigure changes dimensions");
++        check(pool.getAllocationByteCount()==capacity,"pool allocation size must stay fixed");
++        BitmapFactory.Options opts=new BitmapFactory.Options(); opts.inBitmap=pool; opts.inMutable=true;
++        Bitmap decoded=BitmapFactory.decodeByteArray(new byte[]{1,2,3},0,3,opts);
++        check(decoded==pool,"Fresco requires inBitmap identity");
++        check(decoded.getWidth()==16 && decoded.getHeight()==8,"decoded dimensions");
++        check(husk.Gfx.live()==1,"temporary decoded bitmap must be freed");
++        try { pool.reconfigure(100,100,Bitmap.Config.ARGB_8888); throw new AssertionError("oversized reuse accepted"); } catch(IllegalArgumentException expected) {}
++        pool.recycle();
++        try { BitmapFactory.decodeByteArray(new byte[]{1},0,1,opts); throw new AssertionError("recycled reuse accepted"); } catch(IllegalStateException expected) {}
++        check(husk.Gfx.live()==0,"failed reuse must release temporary bitmap");
++        System.out.println("Image compatibility regression tests passed");
++    }
++}
+diff --git a/tests/java/husk/Gfx.java b/tests/java/husk/Gfx.java
+new file mode 100644
+index 0000000..4f70fd9
+--- /dev/null
++++ b/tests/java/husk/Gfx.java
+@@ -0,0 +1,13 @@
++package husk;
++import java.util.HashMap;
++/** Test double for allocation/decoding only; production uses CoreGraphics. */
++public final class Gfx {
++    private static long next;
++    private static final HashMap<Long,Integer> allocations = new HashMap<>();
++    public static long bmNew(int w,int h) { long id=++next; allocations.put(id,w*h*4); return id; }
++    public static void bmFree(long id) { if (allocations.remove(id)==null) throw new AssertionError("double free"); }
++    public static boolean bmReconfigure(long id,int w,int h) { return allocations.containsKey(id) && w*h*4<=allocations.get(id); }
++    public static void bmAssign(long dst,long src) { if (!allocations.containsKey(dst)||!allocations.containsKey(src)) throw new AssertionError("freed bitmap"); }
++    public static long bmDecode(byte[] data,int off,int len,int sample,int[] wh,boolean bounds) { wh[0]=16; wh[1]=8; return bounds?0:bmNew(16,8); }
++    public static int live() { return allocations.size(); }
++}
 diff --git a/tests/test_ios15_bundle.py b/tests/test_ios15_bundle.py
 new file mode 100644
 index 0000000..20d4f74

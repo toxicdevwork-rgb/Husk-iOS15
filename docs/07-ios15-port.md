@@ -157,3 +157,27 @@ It does not replace the app's guest automatically or claim that all of Husk fits
 in 1 GiB. The iOS process also needs QEMU, translated code and rendering memory.
 
 Reference contracts: [AOSP Uri.Builder](https://android.googlesource.com/platform/frameworks/base/+/a69950c/core/java/android/net/Uri.java) and [Fresco image decoder](https://github.com/facebook/fresco/tree/main/imagepipeline/src/main/java/com/facebook/imagepipeline/platform).
+
+
+### Low-RAM measurements and remaining blocker
+
+On the ARM GitHub runner, experiment 38171778456 cold-booted the modified v12
+image with `-m 1024`: Android reported boot completion at 581.6 seconds,
+MemTotal 962656 KiB, MemAvailable 206144 KiB and SwapTotal 0. The full package /
+activity / connectivity checks did not complete, and the guest subsequently rebooted.
+This is evidence that it can reach boot completion at 1 GiB, not evidence of a
+stable Android backend or of a 1 GiB total iOS process footprint.
+
+Experiment 38173550438 used `ro.hw_timeout_multiplier=4`, a persistent bridge
+connection and repeated core-service checks. It rebooted through RescueParty
+at about 316 seconds and was stopped after preserving diagnostics. A diagnostic-only
+image in run 38174295002 added a crash-buffer logger; it is explicitly barred from
+publication. It also rebooted through RescueParty: system_server requested the
+reboot at 328.4 seconds. No useful crash stack was captured, so the underlying
+cause remains unidentified. [Final diagnostics](https://github.com/toxicdevwork-rgb/Husk-iOS15/actions/runs/38175074220).
+No low-RAM guest has replaced the default image in the IPA/TIPA.
+
+The standard-profile alert requesting 3 GB refers to free **storage** for a
+file-backed RAM block, not to the phone having less than 4 GB physical RAM.
+The next guest change needs a passing core-service/stability test and a device
+memory measurement before it can be described as working.

@@ -36,6 +36,7 @@ jobs:
           /tmp/husk-build-python/bin/python -m pip install 'PyYAML==6.0.3' 'Mako==1.3.10'
           echo /tmp/husk-build-python/bin >> "$GITHUB_PATH"
           rustup target add aarch64-apple-ios
+          xcodebuild -downloadComponent MetalToolchain
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
       - uses: actions/setup-java@v4

@@ -1,6 +1,8 @@
 name: Inspect low-RAM Android result
 on:
   workflow_dispatch:
+  push:
+    paths: [.github/workflows/inspect-lowram-result.yml]
   workflow_run:
     workflows: [Test Android with 1 GiB guest RAM]
     types: [completed]
@@ -22,8 +24,14 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import os
+          summary=[]
           for p in sorted(Path('evidence').rglob('*')):
               if p.is_file() and p.suffix in ('.txt', '.json', '.log'):
                   print('FILE', p.name)
-                  print(p.read_text(errors='replace')[-18000:])
+                  content=p.read_text(errors='replace')[-18000:]
+                  print(content)
+                  summary.append('### '+p.name+'\n\n```text\n'+content.replace('```','~~~')+'\n```\n')
+          assert summary, 'No evidence files were downloaded'
+          Path(os.environ['GITHUB_STEP_SUMMARY']).write_text('\n'.join(summary))
           PY

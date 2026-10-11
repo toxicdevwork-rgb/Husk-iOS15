@@ -31,7 +31,7 @@ jobs:
                   print('FILE', p.name)
                   full=p.read_text(errors='replace')
                   if p.name == 'serial.log':
-                      key=re.compile(r'out of memory|lowmemorykiller|lmkd|watchdog|boot_completed|husk_agent|fatal|zygote.*(?:exited|signal)|system_server.*(?:exited|signal)', re.I)
+                      key=re.compile(r'out of memory|lowmemorykiller|lmkd|watchdog|boot_completed|husk_agent|fatal|zygote.*(?:exited|signal)|system_server.*(?:exited|signal)|husk_lowram_logcat|RescueParty|AndroidRuntime|Exception|Caused by|Abort message|Fatal signal|Process:', re.I)
                       selected='\n'.join(line for line in full.splitlines() if key.search(line))[-18000:]
                       summary.append('### Boot and failure signals\n\n```text\n'+selected.replace('```','~~~')+'\n```\n')
                   content=full[-18000:]

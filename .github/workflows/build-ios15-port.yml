@@ -52,12 +52,17 @@ jobs:
           restore-keys: husk-ios156-deps-v1-${{ runner.arch }}-
           path: |
             husk/build/ios-arm64
-            husk/build/android-source
-            husk/build/r8-8.5.35.jar
             husk/build/stamps
             husk/third_party
             husk/guests
             husk/src/rppairing-ios/target
+      - name: Restore Android source resources
+        uses: actions/cache@v4
+        with:
+          key: husk-android-resources-v1-a8dbaecc8f
+          path: |
+            husk/build/android-source
+            husk/build/r8-8.5.35.jar
       - name: Compile dependencies and package IPA
         working-directory: husk
         run: |
@@ -93,8 +98,6 @@ jobs:
           key: husk-ios156-deps-v1-${{ runner.arch }}-${{ github.run_id }}
           path: |
             husk/build/ios-arm64
-            husk/build/android-source
-            husk/build/r8-8.5.35.jar
             husk/build/stamps
             husk/third_party
             husk/guests

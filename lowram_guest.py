@@ -13,7 +13,7 @@ run('qemu-img','convert','-O','raw',w/'source.qcow2',w/'disk.raw')
 r.extract_system(w/'disk.raw',w/'system.img')
 mount=w/'system'; mount.mkdir(exist_ok=True)
 run('sudo','mount','-o','loop,rw',w/'system.img',mount)
-props={'ro.config.low_ram':'true','dalvik.vm.heapstartsize':'8m','dalvik.vm.heapgrowthlimit':'128m','dalvik.vm.heapsize':'256m','dalvik.vm.heaptargetutilization':'0.75','dalvik.vm.heapminfree':'512k','dalvik.vm.heapmaxfree':'8m'}
+props={'ro.config.low_ram':'true','ro.hw_timeout_multiplier':'4','dalvik.vm.heapstartsize':'8m','dalvik.vm.heapgrowthlimit':'128m','dalvik.vm.heapsize':'256m','dalvik.vm.heaptargetutilization':'0.75','dalvik.vm.heapminfree':'512k','dalvik.vm.heapmaxfree':'8m'}
 try:
     # Change existing files in place to retain SELinux xattrs and ownership.
     prop=mount/'system/build.prop'
@@ -71,28 +71,68 @@ cmd=['qemu-system-aarch64','-M','virt,highmem=on','-cpu','max,pauth-impdef=on,sv
 '-device','virtio-gpu-pci,xres=360,yres=640','-device','qemu-xhci','-device','usb-tablet','-device','usb-kbd','-device','virtio-rng-pci',
 '-display','none','-monitor','none','-serial',f'file:{w}/serial.log']
 print('BOOT_COMMAND',cmd,flush=True)
-def shell(command):
-    with socket.create_connection(('127.0.0.1',15599),timeout=3) as s:
-        s.settimeout(5); s.sendall((command+'; echo HUSK_TEST_END\nexit\n').encode()); data=b''
-        while b'HUSK_TEST_END' not in data and len(data)<65536:
-            part=s.recv(4096)
-            if not part: break
+control=None
+sequence=0
+def shell(command, timeout=30):
+    global control, sequence
+    sequence+=1
+    marker=f'HUSK_TEST_END_{sequence}'
+    if control is None:
+        control=socket.create_connection(('127.0.0.1',15599),timeout=3)
+    control.settimeout(timeout)
+    data=b''
+    try:
+        control.sendall((command+'; echo '+marker+'\n').encode())
+        while marker.encode() not in data and len(data)<262144:
+            part=control.recv(4096)
+            if not part: raise OSError('guest closed the command bridge')
             data+=part
+        if marker.encode() not in data: raise OSError('incomplete command response')
         return data.decode(errors='replace')
+    except OSError:
+        if data:
+            with (w/'partial-commands.txt').open('a') as output:
+                output.write(command+'\n'+data.decode(errors='replace')+'\n')
+        control.close(); control=None
+        raise
 report={'guest_mib':1024,'status':'failed','properties':props,'removed_optional_apps':removed}
 with (w/'qemu.log').open('w') as log:
     p=subprocess.Popen(cmd,stdout=log,stderr=log)
     try:
         deadline=time.monotonic()+1200
+        consecutive=0
+        evidence=[]
         while time.monotonic()<deadline and p.poll() is None:
             try:
-                result=shell('echo BOOT=$(getprop sys.boot_completed); echo LOW_RAM=$(getprop ro.config.low_ram)')
-                if 'BOOT=1' in result and 'LOW_RAM=true' in result:
-                    result=shell('cat /proc/meminfo; dumpsys meminfo --oom; service check package; service check activity; service check connectivity; pm list packages | head -20')
-                    (w/'backend-check.txt').write_text(result)
-                    assert 'MemTotal:' in result and "Service package: found" in result and "Service activity: found" in result and "Service connectivity: found" in result
-                    report['status']='booted-backend-services-present'; break
-            except (OSError,AssertionError) as e: print('Waiting for guest:',str(e)[:100],flush=True)
+                result=shell('echo BOOT=$(getprop sys.boot_completed); echo LOW_RAM=$(getprop ro.config.low_ram); echo TIMEOUT_MULTIPLIER=$(getprop ro.hw_timeout_multiplier)', timeout=10)
+                print('BOOT_STATUS',repr(result),flush=True)
+                if 'BOOT=1' in result and 'LOW_RAM=true' in result and 'TIMEOUT_MULTIPLIER=4' in result:
+                    evidence.append(result)
+                    for service in ('package','activity','connectivity','SurfaceFlinger'):
+                        result=shell('service check '+service)
+                        evidence.append(result)
+                        assert 'Service '+service+': found' in result, result
+                    result=shell('cat /proc/meminfo; cat /proc/uptime')
+                    evidence.append(result)
+                    assert 'MemTotal:' in result
+                    total=int(next(line.split()[1] for line in result.splitlines() if line.startswith('MemTotal:')))
+                    assert 0 < total <= 1024*1024, 'guest exceeded 1 GiB'
+                    result=shell('pm list packages | head -20')
+                    evidence.append(result)
+                    assert 'package:' in result, result
+                    consecutive+=1
+                    print('CORE_SERVICES_OK',consecutive,flush=True)
+                    (w/'backend-check.txt').write_text('\n'.join(evidence))
+                    if consecutive >= 4:
+                        report['status']='booted-backend-services-present'
+                        report['stable_samples']=consecutive
+                        break
+                    time.sleep(45)
+                else: consecutive=0
+            except (OSError,AssertionError) as e:
+                consecutive=0
+                if evidence: (w/'backend-check.txt').write_text('\n'.join(evidence))
+                print('Waiting for guest:',str(e)[:200],flush=True)
             serial=w/'serial.log'
             if serial.exists():
                 console=serial.read_text(errors='replace')
@@ -101,13 +141,14 @@ with (w/'qemu.log').open('w') as log:
                     print('Guest firmware/kernel failure; aborting early',flush=True); break
             time.sleep(15)
     finally:
+        if control is not None: control.close()
         p.terminate()
         try: p.wait(timeout=15)
         except subprocess.TimeoutExpired: p.kill(); p.wait()
         report['image_sha256']=hashlib.file_digest((w/'vda-lowram.qcow2').open('rb'),'sha256').hexdigest()
         (w/'result.json').write_text(json.dumps(report,indent=2))
 print(json.dumps(report),flush=True)
-for name in ('qemu.log','serial.log','backend-check.txt'):
+for name in ('qemu.log','serial.log','backend-check.txt','partial-commands.txt'):
     file=w/name
     if file.exists(): print(name, file.read_text(errors='replace')[-12000:], flush=True)
 if report['status']=='failed': raise SystemExit('Low-RAM guest did not pass; do not ship it as working')

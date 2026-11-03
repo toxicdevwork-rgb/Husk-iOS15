@@ -1,0 +1,858 @@
+name: Build refreshed Husk iOS 15
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/build-refresh.yml
+permissions:
+  contents: read
+concurrency:
+  group: husk-ios15-build
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: macos-26-intel
+    timeout-minutes: 360
+    env:
+      SDKMINVER: "15.6"
+      DD: /tmp/husk_ios15
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare pinned Husk with the iOS 15 port
+        run: |
+          git clone --no-checkout --filter=blob:none https://github.com/Leviidev/Husk.git husk
+          git -C husk checkout d92d0a112a391833584ac61f21296e566e404cb8
+          cat > refresh.patch <<'PATCH'
+          diff --git a/scripts/audit_runtime_resources.py b/scripts/audit_runtime_resources.py
+          new file mode 100644
+          index 0000000..4df299b
+          --- /dev/null
+          +++ b/scripts/audit_runtime_resources.py
+          @@ -0,0 +1,58 @@
+          +#!/usr/bin/env python3
+          +"""Fail packaging if Android runtime data is missing, corrupt or stripped of DEX."""
+          +from pathlib import Path
+          +import sys
+          +import zipfile
+          +
+          +JARS = [f'com.android.art/javalib/{n}.jar' for n in
+          +        ('core-oj', 'core-libart', 'okhttp', 'bouncycastle', 'apache-xml')] + [
+          +    'com.android.i18n/javalib/core-icu4j.jar', 'com.android.conscrypt/javalib/conscrypt.jar',
+          +    'org.apache.http.legacy.jar']
+          +LIBS = [f'com.android.art/lib64/{n}.so' for n in
+          +        ('libandroidio', 'libbase', 'libc++', 'libexpat', 'libjavacore', 'libnativehelper', 'libopenjdk')] + [
+          +    f'com.android.conscrypt/lib64/{n}.so' for n in ('libjavacrypto', 'libcrypto', 'libssl')]
+          +
+          +
+          +def audit(root):
+          +    errors = []
+          +    runtime = root/'java-runtime'
+          +    for relative in JARS:
+          +        try:
+          +            with zipfile.ZipFile(runtime/relative) as z:
+          +                data = z.read('classes.dex')
+          +                if not data.startswith(b'dex\n') or len(data) < 112:
+          +                    raise ValueError('invalid classes.dex')
+          +                if z.testzip() is not None:
+          +                    raise ValueError('invalid ZIP CRC')
+          +        except (OSError, KeyError, ValueError, zipfile.BadZipFile) as e:
+          +            errors.append(f'{relative}: {e}')
+          +    for relative in LIBS:
+          +        try:
+          +            with (runtime/relative).open('rb') as f:
+          +                h = f.read(20)
+          +            if len(h) < 20 or h[:5] != b'\x7fELF\x02' or h[18:20] != b'\xb7\x00':
+          +                raise ValueError('expected arm64 ELF library')
+          +        except (OSError, ValueError) as e:
+          +            errors.append(f'{relative}: {e}')
+          +    try:
+          +        data = (runtime/'husk-framework.dex').read_bytes()
+          +        if len(data) < 112 or not data.startswith(b'dex\n'):
+          +            raise ValueError('invalid Husk framework DEX')
+          +        with zipfile.ZipFile(runtime/'framework-res.apk') as z:
+          +            if not z.read('resources.arsc'):
+          +                raise ValueError('empty Android resource table')
+          +    except (OSError, KeyError, ValueError, zipfile.BadZipFile) as e:
+          +        errors.append(str(e))
+          +    for folder, pattern in [('java-runtime/com.android.i18n/etc/icu', '*.dat'),
+          +                            ('java-runtime/com.android.tzdata/etc/tz', 'tzdata'),
+          +                            ('android-system/fonts', '*.ttf'), ('android-system/cacerts', '*'),
+          +                            ('android-system/etc', 'fonts.xml')]:
+          +        if not any(p.is_file() and p.stat().st_size > 0 for p in (root/folder).glob(pattern)):
+          +            errors.append(f'missing/empty {folder}/{pattern}')
+          +    return errors
+          +
+          +
+          +if __name__ == '__main__':
+          +    problems = audit(Path(sys.argv[1]))
+          +    print('\n'.join(problems) if problems else 'Android runtime resources: OK')
+          +    sys.exit(bool(problems))
+          diff --git a/scripts/prepare_android_runtime.py b/scripts/prepare_android_runtime.py
+          new file mode 100644
+          index 0000000..6697c60
+          --- /dev/null
+          +++ b/scripts/prepare_android_runtime.py
+          @@ -0,0 +1,178 @@
+          +#!/usr/bin/env python3
+          +"""Extract the translation runtime from Husk's pinned Lineage image on CI.
+          +
+          +Requires qemu-img and e2fsprogs debugfs. No mounted image or developer-local
+          +Android checkout is needed. All downloads are verified before extraction.
+          +"""
+          +import hashlib
+          +import io
+          +import json
+          +import os
+          +from pathlib import Path
+          +import shutil
+          +import struct
+          +import subprocess
+          +import tempfile
+          +import urllib.request
+          +import zipfile
+          +
+          +ROOT = Path(__file__).resolve().parents[1]
+          +IMAGE_URL = 'https://github.com/Leviidev/Husk/releases/download/lineage-v2/vda-v12.qcow2'
+          +IMAGE_SHA = 'a8dbaecc8fdcd682991b078d6bbb7df6972e459208634fa8dcbad24f17208d6a'
+          +R8_URL = 'https://storage.googleapis.com/r8-releases/raw/8.5.35/r8.jar'
+          +R8_SHA = 'cb112407ef132dfcb1e5e1a9d4e6fefa89807822e65a9ffbdbb68ee442985405'
+          +
+          +
+          +def download(url, dest, expected):
+          +    print('Downloading', url, flush=True)
+          +    subprocess.run(['curl', '-fL', '--retry', '4', '--output', str(dest), url], check=True)
+          +    with dest.open('rb') as f:
+          +        digest = hashlib.file_digest(f, 'sha256').hexdigest()
+          +    if digest != expected:
+          +        dest.unlink()
+          +        raise ValueError(f'Checksum mismatch for {url}: {digest}')
+          +
+          +
+          +def read_exact(f, count):
+          +    data = f.read(count)
+          +    if len(data) != count:
+          +        raise ValueError('Truncated disk/partition metadata')
+          +    return data
+          +
+          +
+          +def extract_system(raw, out):
+          +    """Read GPT and Android logical-partition metadata without macOS gpt."""
+          +    with raw.open('rb') as f:
+          +        f.seek(512)
+          +        header = read_exact(f, 92)
+          +        if header[:8] != b'EFI PART':
+          +            raise ValueError('Expected a GPT disk')
+          +        entries_lba, count, stride = struct.unpack_from('<QII', header, 72)
+          +        if not 128 <= stride <= 4096 or not 2 <= count <= 4096:
+          +            raise ValueError('Invalid GPT entries')
+          +        f.seek(entries_lba * 512)
+          +        entries = read_exact(f, count * stride)
+          +        # This guest puts super in GPT partition 2 (as upstream's extractor does).
+          +        base = struct.unpack_from('<Q', entries, stride + 32)[0] * 512
+          +        f.seek(base + 12288)
+          +        h = read_exact(f, 256)
+          +        magic, _, _, hsize = struct.unpack_from('<IHHI', h)
+          +        tsize = struct.unpack_from('<I', h, 44)[0]
+          +        if magic != 0x414C5030 or not 128 <= hsize <= 4096 or tsize > 16 << 20:
+          +            raise ValueError('Invalid Android logical partition metadata')
+          +        (po, pn, ps), (eo, en, es) = [struct.unpack_from('<III', h, 80 + 12*i) for i in range(2)]
+          +        f.seek(base + 12288 + hsize)
+          +        table = read_exact(f, tsize)
+          +        if ps < 52 or es < 24 or po + pn*ps > tsize or eo + en*es > tsize:
+          +            raise ValueError('Invalid logical partition table bounds')
+          +        for i in range(pn):
+          +            entry = table[po+i*ps:po+(i+1)*ps]
+          +            name = entry[:36].split(b'\0')[0]
+          +            if name not in (b'system', b'system_a'):
+          +                continue
+          +            _, first, n, _ = struct.unpack_from('<IIII', entry, 36)
+          +            if first + n > en:
+          +                raise ValueError('Invalid extent index')
+          +            with out.open('wb') as w:
+          +                for j in range(first, first+n):
+          +                    sectors, kind, sector, device = struct.unpack_from('<QIQI', table, eo+j*es)
+          +                    left = sectors * 512
+          +                    if kind == 1:  # zero extent; keep the output sparse
+          +                        w.seek(left, 1)
+          +                        continue
+          +                    if kind != 0 or device != 0:
+          +                        raise ValueError('Unsupported logical partition extent')
+          +                    f.seek(base + sector*512)
+          +                    while left:
+          +                        data = read_exact(f, min(left, 8 << 20))
+          +                        w.write(data)
+          +                        left -= len(data)
+          +                w.truncate()
+          +            return
+          +        raise ValueError('System partition missing')
+          +
+          +
+          +def main():
+          +    source = ROOT / 'build/android-source'
+          +    stamp = source / 'source.sha256'
+          +    debugfs = shutil.which('debugfs')
+          +    if not debugfs:
+          +        prefix = subprocess.check_output(['brew', '--prefix', 'e2fsprogs'], text=True).strip()
+          +        debugfs = str(Path(prefix) / 'sbin/debugfs')
+          +
+          +    def dump(image, path, dest, directory=False):
+          +        # debugfs may exit 0 on a missing file: validate the actual output.
+          +        result_log = subprocess.run([debugfs, '-R', f'{"rdump" if directory else "dump"} {path} {dest}', str(image)], check=True, capture_output=True, text=True)
+          +        result = dest / Path(path).name if directory else dest
+          +        if not result.exists() or (result.is_file() and result.stat().st_size == 0):
+          +            raise ValueError(f'Missing required Android resource: {path}\n{result_log.stderr}')
+          +        return result
+          +
+          +    if not stamp.exists() or stamp.read_text().strip() != IMAGE_SHA:
+          +        with tempfile.TemporaryDirectory(prefix='husk-android-') as tmp:
+          +            work = Path(tmp)
+          +            download(IMAGE_URL, work / 'vda.qcow2', IMAGE_SHA)
+          +            subprocess.run(['qemu-img', 'convert', '-O', 'raw', str(work/'vda.qcow2'), str(work/'vda.raw')], check=True)
+          +            extract_system(work/'vda.raw', work/'system.img')
+          +            if source.exists():
+          +                shutil.rmtree(source)
+          +            (source/'apex').mkdir(parents=True)
+          +            (source/'framework').mkdir()
+          +            system = work/'system.img'
+          +            # Keep only the four APEX packages that the runtime consumes.
+          +            apex_dir = work/'apex-files'
+          +            apex_dir.mkdir()
+          +            listing = subprocess.check_output([debugfs, '-R', 'ls -p /system/apex', str(system)], text=True)
+          +            for module in ('art', 'i18n', 'conscrypt', 'tzdata'):
+          +                name = 'com.android.' + module
+          +                filename = next((name+ext for ext in ('.capex', '.apex') if '/'+name+ext+'/' in listing), None)
+          +                if filename is None:
+          +                    raise ValueError(f'{name} is absent from the Lineage image')
+          +                package = dump(system, '/system/apex/'+filename, apex_dir/filename)
+          +                with zipfile.ZipFile(package) as z:
+          +                    if 'original_apex' in z.namelist():
+          +                        with zipfile.ZipFile(io.BytesIO(z.read('original_apex'))) as original:
+          +                            payload = original.read('apex_payload.img')
+          +                    else:
+          +                        payload = z.read('apex_payload.img')
+          +                img = work/(name+'.img')
+          +                img.write_bytes(payload)
+          +                dest = source/'apex'/name
+          +                dest.mkdir()
+          +                for folder in {'art': ['javalib', 'lib64'], 'i18n': ['javalib', 'lib64', 'etc'],
+          +                               'conscrypt': ['javalib', 'lib64', 'cacerts'], 'tzdata': ['etc']}[module]:
+          +                    dump(img, '/'+folder, dest, directory=True)
+          +            for filename in ('org.apache.http.legacy.jar', 'framework-res.apk'):
+          +                dump(system, '/system/framework/'+filename, source/'framework'/filename)
+          +            android = source/'android-system'
+          +            (android/'etc').mkdir(parents=True)
+          +            dump(system, '/system/fonts', android, directory=True)
+          +            for f in (android/'fonts').glob('*CJK*'):
+          +                f.unlink()
+          +            for filename in ('fonts.xml', 'font_fallback.xml'):
+          +                dump(system, '/system/etc/'+filename, android/'etc'/filename)
+          +            shutil.copytree(source/'apex/com.android.conscrypt/cacerts', android/'cacerts')
+          +            stamp.write_text(IMAGE_SHA+'\n')
+          +
+          +    r8 = ROOT/'build/r8-8.5.35.jar'
+          +    if not r8.exists() or hashlib.sha256(r8.read_bytes()).hexdigest() != R8_SHA:
+          +        download(R8_URL, r8, R8_SHA)
+          +    env = dict(os.environ, HUSK_D8=str(r8),
+          +               HTTP_LEGACY=str(source/'framework/org.apache.http.legacy.jar'),
+          +               FRAMEWORK_RES=str(source/'framework/framework-res.apk'))
+          +    subprocess.run(['bash', str(ROOT/'scripts/build_java_runtime.sh'), str(source/'apex')], env=env, check=True)
+          +    android_out = ROOT/'build/android-system'
+          +    if android_out.exists():
+          +        shutil.rmtree(android_out)
+          +    shutil.copytree(source/'android-system', android_out)
+          +    from audit_runtime_resources import audit
+          +    errors = audit(ROOT/'build')
+          +    if errors:
+          +        raise ValueError('\n'.join(errors))
+          +    (ROOT/'build/java-runtime/provenance.json').write_text(json.dumps({
+          +        'image': IMAGE_URL, 'sha256': IMAGE_SHA, 'd8': R8_URL, 'd8_sha256': R8_SHA}, indent=2)+'\n')
+          +    print('Android translation runtime validated', flush=True)
+          +
+          +
+          +if __name__ == '__main__':
+          +    main()
+          diff --git a/src/app/Husk/ru.lproj/Localizable.strings b/src/app/Husk/ru.lproj/Localizable.strings
+          new file mode 100644
+          index 0000000..6e0d9a3
+          --- /dev/null
+          +++ b/src/app/Husk/ru.lproj/Localizable.strings
+          @@ -0,0 +1,362 @@
+          +// Husk iOS 15 interface translations.
+          +"1 pixel per point. Fastest." = "1 пиксель на точку. Самый быстрый вариант.";
+          +"1.5 pixels per point." = "1,5 пикселя на точку.";
+          +"2 pixels per point. The default." = "2 пикселя на точку. По умолчанию.";
+          +"ATTEMPT LOG" = "ЖУРНАЛ ЗАПУСКА";
+          +"About" = "О приложении";
+          +"About this app" = "Об этом приложении";
+          +"Accent Colour" = "Цвет акцента";
+          +"Add" = "Добавить";
+          +"Add Download" = "Добавить загрузку";
+          +"Add a Game or App" = "Добавить игру или приложение";
+          +"Add to Husk" = "Добавить в Husk";
+          +"Add your first game" = "Добавьте первое приложение";
+          +"All" = "Все";
+          +"Always" = "Всегда";
+          +"Android Libraries Used" = "Используемые библиотеки Android";
+          +"Android and Translation Layer need JIT. On iOS 15, use TrollStore or Dopamine with Allow JIT in Apps enabled." = "Для Android и трансляции нужен JIT. На iOS 15 используйте TrollStore или Dopamine с включённой настройкой Allow JIT in Apps.";
+          +"Android apps, on your iPhone." = "Приложения Android на вашем iPhone.";
+          +"Android needs at least 3 GB of free storage on this iPhone for its RAM file. Free some space and restart Husk. Translation Layer does not need this file." = "Для файла памяти Android на этом iPhone нужно не менее 3 ГБ свободного места. Освободите место и перезапустите Husk. Для трансляции этот файл не нужен.";
+          +"Android needs permission to write and execute generated code. " = "Android нужно разрешение на запись и выполнение сгенерированного кода. ";
+          +"Android update ready" = "Доступно обновление Android";
+          +"Android will boot from cold once, then save a new one." = "Android загрузится с нуля, затем сохранит новый снимок.";
+          +"Another game is already loaded" = "Уже загружено другое приложение";
+          +"App Icon" = "Значок приложения";
+          +"App Info" = "О приложении";
+          +"Appearance" = "Оформление";
+          +"Apps" = "Приложения";
+          +"Architectures" = "Архитектуры";
+          +"Ask about Android updates" = "Спрашивать об обновлениях Android";
+          +"Attach the sound device" = "Подключить звуковое устройство";
+          +"Automatic" = "Автоматически";
+          +"Back" = "Назад";
+          +"Back to Husk" = "Вернуться в Husk";
+          +"Boots the guest as soon as Husk opens, when JIT is available." = "Запускать Android сразу после открытия Husk, если доступен JIT.";
+          +"Both sides must be between 240 and 2560." = "Каждая сторона должна быть от 240 до 2560 пикселей.";
+          +"Browse Files" = "Открыть файлы";
+          +"Browse and download apps using an anonymous Aurora guest account, or sign in with your Google account." = "Просматривайте и скачивайте приложения через гостевой аккаунт Aurora или войдите в свой аккаунт Google.";
+          +"Built-in StikJIT" = "Встроенный StikJIT";
+          +"Cancel" = "Отмена";
+          +"Cancel pairing" = "Отменить сопряжение";
+          +"Cannot Read This Folder" = "Не удалось прочитать папку";
+          +"Cannot start Android" = "Не удалось запустить Android";
+          +"Change JIT Setup" = "Изменить настройку JIT";
+          +"Check setup" = "Проверить настройку";
+          +"Choose another file" = "Выбрать другой файл";
+          +"Choose pairing file" = "Выбрать файл сопряжения";
+          +"Clear" = "Очистить";
+          +"Clear Finished" = "Очистить завершённые";
+          +"Close" = "Закрыть";
+          +"Connect LocalDevVPN" = "Подключить LocalDevVPN";
+          +"Connecting to Google Play…" = "Подключение к Google Play…";
+          +"Console" = "Консоль";
+          +"Continue" = "Продолжить";
+          +"Continue with the current pairing" = "Продолжить с текущим сопряжением";
+          +"Controller" = "Геймпад";
+          +"Controls" = "Управление";
+          +"Copy" = "Копировать";
+          +"Copy Package Name" = "Скопировать имя пакета";
+          +"Could not start — see the log" = "Не удалось запустить — откройте журнал";
+          +"Crash Report" = "Отчёт об ошибке";
+          +"Current" = "Текущая";
+          +"Custom" = "Свое";
+          +"Custom Colour" = "Свой цвет";
+          +"Custom resolution" = "Свое разрешение";
+          +"Data" = "Данные";
+          +"Default" = "По умолчанию";
+          +"Delete saved machine" = "Удалить сохранённую машину";
+          +"Developer Info" = "Данные для разработчика";
+          +"Device Checks" = "Проверки устройства";
+          +"Discover" = "Каталоги";
+          +"Display" = "Изображение";
+          +"Done" = "Готово";
+          +"Download" = "Скачать";
+          +"Download Geode" = "Скачать Geode";
+          +"Download pre-booted snapshot" = "Скачать готовый снимок Android";
+          +"Downloading…" = "Скачивание…";
+          +"Downloads" = "Загрузки";
+          +"Edit pad" = "Настроить геймпад";
+          +"Empty" = "Пусто";
+          +"Emulator" = "Эмулятор";
+          +"Enable JIT" = "Включить JIT";
+          +"Enable JIT with TrollStore" = "Включить JIT через TrollStore";
+          +"English" = "Английский";
+          +"Error" = "Ошибка";
+          +"Every pixel the screen has. Sharpest, and heaviest." = "Полное разрешение экрана. Чётче, но требует больше ресурсов.";
+          +"Everything is up to date" = "Всё обновлено";
+          +"Experimental GPU renderer. If Android stays black, select CPU and restart Husk." = "Экспериментальный режим GPU. Если Android показывает чёрный экран, выберите CPU и перезапустите Husk.";
+          +"Featured Apps" = "Подборка приложений";
+          +"Files" = "Файлы";
+          +"Find apps in F-Droid and other repositories" = "Приложения из F-Droid и других каталогов";
+          +"First boot can take 5–15 minutes. Progress is reported by Android." = "Первый запуск может занять 5–15 минут. Прогресс поступает от Android.";
+          +"For apps the translation layer can't run yet" = "Для приложений, которые пока не поддерживаются трансляцией";
+          +"Frame rate" = "Частота кадров";
+          +"Free" = "Бесплатно";
+          +"Full Screen" = "На весь экран";
+          +"GET" = "Скачать";
+          +"GPU machine" = "Машина с GPU";
+          +"Gamepad" = "Геймпад";
+          +"Games" = "Игры";
+          +"General" = "Основные";
+          +"Generate App Clip" = "Создать ярлык приложения";
+          +"Google Play Store" = "Магазин Google Play";
+          +"Guest Account (Aurora)" = "Гостевой аккаунт (Aurora)";
+          +"Guest screen" = "Экран Android";
+          +"Height" = "Высота";
+          +"Hide" = "Скрыть";
+          +"Hide log" = "Скрыть журнал";
+          +"Hide pad" = "Скрыть геймпад";
+          +"Hide the interface" = "Скрывать интерфейс";
+          +"High" = "Высокое";
+          +"Home" = "Главная";
+          +"Home Screen" = "Экран «Домой»";
+          +"How it connects" = "Как работает подключение";
+          +"How it works" = "Как это работает";
+          +"How should Husk behave?" = "Настройте Husk под себя";
+          +"Husk closed while the game was running" = "Husk закрылся во время работы приложения";
+          +"Husk was marked as debugged when it opened, so JIT is on." = "При открытии Husk получил права отладки: JIT включён.";
+          +"Husk will use StikDebug." = "Husk будет использовать StikDebug.";
+          +"Husk will use TrollStore." = "Husk будет использовать TrollStore.";
+          +"Import" = "Импортировать";
+          +"Import Files" = "Импортировать файлы";
+          +"Import a new pairing file" = "Импортировать новый файл сопряжения";
+          +"Input" = "Управление";
+          +"Install" = "Установить";
+          +"Installs it into Android once Android is downloaded and started." = "Установить после скачивания и запуска Android.";
+          +"Installs it into Android the next time Android starts." = "Установить при следующем запуске Android.";
+          +"Installs it into Android, where any app can run." = "Установить в Android. Совместимость зависит от приложения.";
+          +"Internet and saved sessions" = "Интернет и сохранённые сеансы";
+          +"It opens as soon as Android answers." = "Откроется, когда Android будет готов.";
+          +"It's connected" = "Подключено";
+          +"JIT & Sideload" = "JIT и установка приложений";
+          +"JIT & sideload" = "JIT и установка приложений";
+          +"JIT is on." = "JIT включён.";
+          +"JIT off" = "JIT выключен";
+          +"JIT on" = "JIT включён";
+          +"Jailbreak (Dopamine)" = "Джейлбрейк (Dopamine)";
+          +"Java Code" = "Код Java";
+          +"Java runtime files are missing. Install the complete Husk build." = "Отсутствуют файлы среды Java. Установите полную сборку Husk.";
+          +"Keep debugger attached" = "Не отключать отладчик";
+          +"Keep the network across saves" = "Сохранять состояние сети";
+          +"Keep the screen on" = "Не выключать экран";
+          +"Keyboard" = "Клавиатура";
+          +"Landscape" = "Горизонтально";
+          +"Landscape screen" = "Горизонтальный экран";
+          +"Language" = "Язык";
+          +"Last Run" = "Последний запуск";
+          +"Last lines" = "Последние строки журнала";
+          +"Launch" = "Запустить";
+          +"Library" = "Библиотека";
+          +"Light or dark, accent colour, app icon" = "Тема, цвет акцента и значок приложения";
+          +"Loading libraries and starting the engine" = "Загрузка библиотек и запуск среды выполнения";
+          +"Loading the engine…" = "Загрузка среды выполнения…";
+          +"Log" = "Журнал";
+          +"Logs" = "Журналы";
+          +"Low" = "Низкое";
+          +"Mass Test" = "Массовая проверка";
+          +"Medium" = "Среднее";
+          +"Method" = "Способ";
+          +"Mods" = "Модификации";
+          +"Mouse" = "Мышь";
+          +"Multitasking" = "Многозадачность";
+          +"N/A" = "Нет данных";
+          +"Native" = "Исходное";
+          +"Native runtime" = "Нативная среда выполнения";
+          +"Network" = "Сеть";
+          +"Never" = "Никогда";
+          +"No Results" = "Ничего не найдено";
+          +"No downloads" = "Загрузок нет";
+          +"No featured apps available. Try searching above." = "Подборка недоступна. Воспользуйтесь поиском.";
+          +"No log yet. It is written the first time the game runs." = "Журнала пока нет. Он появится после первого запуска.";
+          +"No new boot milestone. Open the logs to see whether Android is making progress." = "Новых этапов загрузки нет. Откройте журнал, чтобы проверить, продолжает ли Android работать.";
+          +"None" = "Нет";
+          +"None (Java only)" = "Нет (только Java)";
+          +"Not Now" = "Не сейчас";
+          +"Not now" = "Не сейчас";
+          +"Not scanned" = "Не проверено";
+          +"Not yet" = "Пока недоступно";
+          +"Nothing is in this folder yet." = "В этой папке пока ничего нет.";
+          +"Nothing was recorded, which usually means iOS ended Husk for using too much memory, or Husk was closed from the app switcher." = "Причина не записана. Возможно, iOS завершила Husk из-за нехватки памяти или приложение закрыли вручную.";
+          +"Now" = "Сейчас";
+          +"OK" = "ОК";
+          +"On iOS 15, use TrollStore or Dopamine with Allow JIT in Apps enabled." = "На iOS 15 используйте TrollStore или Dopamine с включённой настройкой Allow JIT in Apps.";
+          +"On-screen controller" = "Экранный геймпад";
+          +"Opacity" = "Непрозрачность";
+          +"Open" = "Открыть";
+          +"Open " = "Открыть ";
+          +"Open Apps in Windows" = "Открывать приложения в окнах";
+          +"Open Console" = "Открыть консоль";
+          +"Open In" = "Режим открытия";
+          +"Open Settings" = "Открыть настройки";
+          +"Open boot logs" = "Открыть журнал загрузки";
+          +"Open in Files" = "Открыть в «Файлах»";
+          +"Orientation" = "Ориентация";
+          +"Other Ways to Turn On JIT" = "Другие способы включить JIT";
+          +"Package" = "Пакет";
+          +"Pad" = "Геймпад";
+          +"Pair again" = "Повторить сопряжение";
+          +"Pair on this iPhone" = "Сопряжение на этом iPhone";
+          +"Paired on this device." = "Сопряжение создано на этом устройстве.";
+          +"Pairing file imported." = "Файл сопряжения импортирован.";
+          +"Performance" = "Производительность";
+          +"Performance readout" = "Показатели производительности";
+          +"Play " = "Играть в ";
+          +"Portrait" = "Вертикально";
+          +"Preset" = "Шаблон";
+          +"Preview" = "Просмотр";
+          +"Rating" = "Оценка";
+          +"Re-fetch icons" = "Загрузить значки заново";
+          +"Reading…" = "Чтение…";
+          +"Ready" = "Готово";
+          +"Ready to open" = "Можно открыть";
+          +"Ready to play" = "Можно играть";
+          +"Refresh" = "Обновить";
+          +"Refresh from Android" = "Обновить из Android";
+          +"Refreshing…" = "Обновление…";
+          +"Remove" = "Удалить";
+          +"Renderer" = "Рендерер";
+          +"Renderer, sound" = "Графика и звук";
+          +"Reset" = "Сбросить";
+          +"Reset All" = "Сбросить всё";
+          +"Reset Developer Disk Image" = "Сбросить образ разработчика";
+          +"Reset Game Data" = "Сбросить данные приложения";
+          +"Resolution" = "Разрешение";
+          +"Restart Husk after changing the language." = "После смены языка перезапустите Husk.";
+          +"Restart Husk to switch between Android and Translation Layer. Disable Start Android on launch before opening a translated app." = "Для смены режима полностью закройте и снова откройте Husk. Перед запуском трансляции отключите «Запускать Android при открытии Husk» в настройках JIT.";
+          +"Rotate picture" = "Повернуть изображение";
+          +"Running" = "Работает";
+          +"Runs With" = "Способ запуска";
+          +"Runtime" = "Среда выполнения";
+          +"Russian" = "Русский";
+          +"Save Android" = "Сохранить Android";
+          +"Save automatically" = "Сохранять автоматически";
+          +"Save now" = "Сохранить сейчас";
+          +"Saved Data" = "Сохранённые данные";
+          +"Saved Machine" = "Сохранённая машина";
+          +"Saved machine" = "Сохранённая машина";
+          +"Saves, settings and caches the game made here are deleted." = "Сохранения, настройки и кэш приложения будут удалены.";
+          +"Saving…" = "Сохранение…";
+          +"Screen" = "Экран";
+          +"Screen, touch, keyboard" = "Экран, касания и клавиатура";
+          +"Screenshots" = "Снимки экрана";
+          +"Search Google Play" = "Поиск в Google Play";
+          +"Search Results" = "Результаты поиска";
+          +"Searching…" = "Поиск…";
+          +"See All" = "Показать все";
+          +"Set Up StikJIT Now" = "Настроить JIT";
+          +"Set up JIT" = "Настроить JIT";
+          +"Settings" = "Настройки";
+          +"Share Log" = "Поделиться журналом";
+          +"Share Report" = "Поделиться отчётом";
+          +"Show" = "Показать";
+          +"Show in Android Settings" = "Открыть настройки Android";
+          +"Sideloading" = "Установка приложений";
+          +"Sign In" = "Войти";
+          +"Sign In with Google" = "Войти через Google";
+          +"Sign Out" = "Выйти из аккаунта";
+          +"Sign in with Google" = "Войти через Google";
+          +"Signing in to Google…" = "Вход в Google…";
+          +"Signing in…" = "Вход…";
+          +"Size" = "Размер";
+          +"Snapshots and automatic saving" = "Снимки состояния и автосохранение";
+          +"Software machine" = "Машина с программной графикой";
+          +"Software rendering is the default for Android on iOS 15. Translation Layer can still use Metal. Restart Husk after changing the renderer." = "На iOS 15 Android по умолчанию использует программную графику. Трансляция по-прежнему может использовать Metal. После смены рендерера перезапустите Husk.";
+          +"Something failed" = "Произошла ошибка";
+          +"Sound" = "Звук";
+          +"Start" = "Запустить";
+          +"Start Android on launch" = "Запускать Android при открытии Husk";
+          +"Start pairing" = "Начать сопряжение";
+          +"Start using Husk" = "Начать работу с Husk";
+          +"Starting" = "Запуск";
+          +"Starting Android…" = "Запуск Android…";
+          +"Starting…" = "Запуск…";
+          +"StikDebug requires iOS 17.4 or later." = "Для StikDebug нужна iOS 17.4 или новее.";
+          +"Storage" = "Хранилище";
+          +"Store" = "Магазин";
+          +"Tap with three fingers to show the interface" = "Коснитесь экрана тремя пальцами, чтобы показать интерфейс";
+          +"Technical Details" = "Технические сведения";
+          +"The end of the log from the last time the game started. Share it when reporting a problem." = "Конец журнала последнего запуска. Приложите его к сообщению о проблеме.";
+          +"The game could not start" = "Не удалось запустить приложение";
+          +"The game crashed" = "Приложение аварийно завершилось";
+          +"The game exited" = "Приложение завершило работу";
+          +"The game is loaded in this session. Close Husk completely and open it again to reset its data." = "Приложение загружено в этом сеансе. Полностью закройте Husk и откройте снова для сброса данных.";
+          +"The report holds the full log of that run and which device and build it was on. Nothing is sent anywhere unless you share it." = "Отчёт содержит журнал запуска, модель устройства и версию сборки. Он отправляется только по вашей команде.";
+          +"The runtime could not start it. The report says which part was missing." = "Среда выполнения не смогла запустить приложение. В отчёте указаны недостающие компоненты.";
+          +"Theme" = "Тема";
+          +"This iOS 15 build uses TrollStore or Dopamine for JIT." = "В этой сборке для iOS 15 JIT включается через TrollStore или Dopamine.";
+          +"This was removed." = "Приложение удалено.";
+          +"Tints buttons, switches and selected states throughout the app." = "Цвет кнопок, переключателей и выбранных элементов.";
+          +"Touch" = "Касания";
+          +"Translation Layer" = "Трансляция кода";
+          +"TrollStore is installed." = "TrollStore установлен.";
+          +"TrollStore or Dopamine on iOS 15" = "TrollStore или Dopamine на iOS 15";
+          +"Try Again" = "Повторить";
+          +"Turn On JIT at Launch" = "Включать JIT при открытии";
+          +"Turn on JIT" = "Включить JIT";
+          +"Uninstall" = "Удалить приложение";
+          +"Unrotate picture" = "Вернуть ориентацию";
+          +"Up to date" = "Обновлено";
+          +"Updates" = "Обновления";
+          +"Use Guest Account" = "Войти как гость";
+          +"Use Guest Account (Aurora)" = "Войти как гость (Aurora)";
+          +"Use Husk while an app runs" = "Работать с Husk во время игры";
+          +"Use Husk while it starts" = "Перейти в Husk";
+          +"Use StikDebug" = "Использовать StikDebug";
+          +"Use TrollStore" = "Использовать TrollStore";
+          +"Use a jailbreak" = "Использовать джейлбрейк";
+          +"Use a pairing file" = "Использовать файл сопряжения";
+          +"Use the jailbreak" = "Использовать джейлбрейк";
+          +"Version" = "Версия";
+          +"Vibrate on a press" = "Вибрация при нажатии";
+          +"View" = "Открыть";
+          +"View Release" = "Открыть страницу версии";
+          +"Waiting for Android" = "Ожидание Android";
+          +"Width" = "Ширина";
+          +"Window" = "В окне";
+          +"Working…" = "Выполняется…";
+          +"Your apps and their icons" = "Ваши приложения и их значки";
+          +"file imported" = "файл импортирован";
+          +"not set up" = "не настроено";
+          +"not started" = "не запущен";
+          +"paired on this device" = "сопряжение создано на этом устройстве";
+          +"starting" = "запуск";
+          +"Apps and games open in a window you can move, resize and minimise to a dock, like LiveContainer's multitasking. Each app can override this in its own settings." = "Приложение откроется в окне, которое можно перемещать, менять в размере и сворачивать. Режим можно изменить отдельно в настройках каждого приложения.";
+          +"The list is written to disk, so it is on screen before Android has finished starting." = "Список хранится на устройстве и доступен ещё до завершения загрузки Android.";
+          +"Names and icons come from Android's own launcher, which keeps the version it draws. Re-fetching throws away Husk's copies and asks again." = "Названия и значки поступают из Android. Повторная загрузка заменяет их копии в Husk.";
+          +"Adds a sound device. While it is attached Android cannot be saved — QEMU refuses to snapshot a machine with one — so every launch boots from cold. Turning it on or off costs a cold boot either way." = "Подключает звуковое устройство. QEMU не сохраняет снимки машины с этим устройством, поэтому Android каждый раз загружается с нуля. Смена этой настройки также требует полной загрузки.";
+          +"The panel is built when the machine starts, so a change costs one cold boot, and the next save replaces the machine saved at the old size — changing back costs another. Sizes are rounded to a multiple of eight. Bigger is slower: every pixel is drawn by an emulated phone. Android's density does not change with the panel, so a larger one shows more rather than bigger." = "Смена разрешения требует полной загрузки Android. Новый снимок заменит сохранённую машину со старым размером экрана. Размеры округляются до кратных восьми. Большое разрешение снижает скорость и позволяет разместить больше элементов.";
+          +"Touch is always on. The keyboard and the rotate control are in the pill at the bottom of the guest's screen; a gamepad and a pointer are not wired through yet." = "Касания работают всегда. Клавиатура и поворот доступны в панели внизу экрана Android. Передача геймпада и мыши пока не реализована.";
+          +"Android reaches the internet through a virtual ethernet card on QEMU's own network. Nothing on your phone's network can see the guest, and the guest cannot see it." = "Android подключается к интернету через виртуальную сетевую карту QEMU. Входящие подключения ограничены настройками виртуальной сети.";
+          +"Husk needs memory it can write and then execute, which on iOS takes an attached debugger. There are two ways to get it: a debugger that services trap requests, or a MAP_JIT mapping, which the kernel allows any debugged process. Either one is enough — which is available depends on the device and the iOS version, so Husk tests both rather than assuming." = "Для JIT нужна память, в которую можно записывать и затем выполнять код. На iOS 15 Husk проверяет доступные способы выделения такой памяти. Используйте TrollStore или Dopamine с включённой настройкой Allow JIT in Apps.";
+          +"Off by default. Husk detaches StikDebug as soon as the JIT region is held, because a debugger that iOS has suspended stops the whole app the next time it is needed. Turn this on only to collect StikDebug's own logs." = "По умолчанию выключено. Отладчик отключается после выделения памяти JIT. Эта настройка нужна для сбора журналов StikDebug на поддерживаемых версиях iOS; на iOS 15 StikDebug недоступен.";
+          +"APKs install from the Library's + button or from the Files tab. Split sets — a base APK plus its config pieces — must be picked together; installing the base alone fails on missing native libraries." = "Установить APK можно кнопкой «+» в библиотеке или через вкладку «Файлы». Для split APK выбирайте основной пакет и все его части вместе, иначе приложению будет не хватать библиотек.";
+          +"Husk restores a saved machine instead of booting it, which takes seconds rather than minutes. The picture freezes while it writes. With this off, nothing saves by itself — including after an install." = "Husk восстанавливает сохранённую машину вместо полной загрузки. Во время сохранения изображение замирает. Если автосохранение выключено, состояние нужно сохранять вручную, в том числе после установки приложений.";
+          +"Adds about 2 GB to the first download. It was captured on the software renderer, so it is not used on GPU — which cold-boots once and then saves its own." = "Дополнительно скачивает около 2 ГБ. Снимок создан с программной графикой и требует совместимой конфигурации памяти. Режим GPU начинает загрузку с нуля и сохраняет собственный снимок.";
+          +"When a new Android image or snapshot is published, Husk asks once whether to download it. Never asked before Android has been downloaded." = "Когда выходит новый образ Android или снимок, Husk предлагает его скачать. Предложения появятся только после первой установки Android.";
+          +"System follows the phone: light by day, dark by night. The guest's own screen stays dark either way — it is a picture of another phone." = "Системная тема повторяет оформление iPhone. Эта настройка меняет интерфейс Husk, но не тему внутри Android.";
+          +"Automatic follows the system appearance — light, dark and tinted. The others pin one look. iOS shows its own confirmation after a change; that alert cannot be turned off." = "Автоматический режим следует оформлению системы. Остальные варианты фиксируют вид значка. После смены значка iOS показывает своё подтверждение.";
+          +"Technical detail in the Android Translation Layer screens: library reports, device checks and run logs." = "Технические сведения на экранах трансляции: отчёты о библиотеках, проверки устройства и журналы запуска.";
+          +"Husk runs unmodified Android APKs in a real Android system on your iPhone. The console shows Husk's live log, the guest's serial output and QEMU's own output — the three files any problem here is diagnosed from." = "Husk запускает Android-приложения через трансляцию или эмуляцию Android. Совместимость зависит от приложения и устройства. В консоли доступны журналы Husk, Android и QEMU для диагностики.";
+          +"This installation can only wait about 30 seconds in the background, so go to Settings straight away." = "В фоне эта установка может ждать около 30 секунд. Сразу перейдите в настройки.";
+          +"Pick an APK or a bundle (.xapk, .apkm, .apks), or share one to Husk from Files or Safari. Games run straight on your iPhone. Other apps run inside Android." = "Выберите APK или набор пакетов (.xapk, .apkm, .apks), либо отправьте его в Husk из «Файлов» или Safari. Доступны трансляция и запуск внутри Android; совместимость зависит от приложения.";
+          +"Husk runs a real Android system and opens APKs inside it. A few questions first — all of them can be changed later in Settings." = "Husk запускает Android и поддерживаемые APK. Сначала выберите основные настройки — их можно изменить позже.";
+          +"Android and Translation Layer games need JIT, which on iOS only an attached debugger can grant. StikJIT is built into Husk and is the recommended way: it turns JIT on from inside the app, with no computer and no other app. StikDebug and TrollStore work too." = "Для Android и трансляции нужен JIT. В этой сборке для iOS 15 используйте TrollStore или Dopamine с включённой настройкой Allow JIT in Apps. Встроенное сопряжение и StikDebug на iOS 15 недоступны.";
+          +"If JIT is not on when Android starts, Husk turns it on with the method you chose, or walks you through setting one up. You can change it any time in Settings › JIT & sideload." = "Если JIT недоступен, Husk предложит его настроить. Выбор можно изменить в разделе «Настройки → JIT и установка приложений».";
+          +"JIT was already on when Husk opened." = "JIT уже был включён при открытии Husk.";
+          +"A jailbreak was found. Turn on Allow JIT in Apps." = "Обнаружен джейлбрейк. Включите Allow JIT in Apps в Dopamine.";
+          +"Dopamine can give every app JIT with one setting." = "Dopamine позволяет включить JIT настройкой Allow JIT in Apps.";
+          +"For a Husk installed through TrollStore." = "Для Husk, установленного через TrollStore.";
+          +"Import a pairing file made on a computer." = "Импортировать файл сопряжения, созданный на компьютере.";
+          +"With icons" = "Со значками";
+          +"Pair on this device" = "Сопряжение на этом устройстве";
+          +"On a device jailbroken with Dopamine, JIT is a setting: the jailbreak marks every app as debugged when it opens, and a debugged app may run code it wrote. Husk needs nothing else." = "В Dopamine JIT включается настройкой Allow JIT in Apps. Права применяются при запуске приложения, поэтому после изменения настройки нужно полностью перезапустить Husk.";
+          +"Open Dopamine and go to its Settings." = "Откройте Dopamine и перейдите в его настройки.";
+          +"Turn on Allow JIT in Apps." = "Включите Allow JIT in Apps (разрешить JIT в приложениях).";
+          +"Close Husk completely and open it again. The setting applies to apps as they start." = "Полностью закройте Husk и откройте снова. Настройка применяется при запуске приложений.";
+          +"TrollStore can enable JIT for apps it installed, with no pairing file, VPN or computer." = "TrollStore может включать JIT для установленных через него приложений без файла сопряжения, VPN или компьютера.";
+          +"Install Husk.ipa through TrollStore, on an iOS version TrollStore supports. It carries the entitlements TrollStore keeps, so the same file works there and in a sideloader." = "Установите Husk-iOS15.tipa через TrollStore на поддерживаемой версии iOS. Этот пакет подготовлен для установки через TrollStore.";
+          +"In TrollStore's Settings, turn on URL Scheme. TrollStore ignores enable-jit requests without it." = "В настройках TrollStore включите URL Scheme. Без этой настройки TrollStore игнорирует запросы на включение JIT.";
+          +"Whenever Android or a game starts, Husk asks TrollStore to enable JIT. TrollStore opens Husk, attaches to it for a moment and lets go, which leaves it allowed to run code it wrote." = "При запуске Android или приложения Husk запрашивает включение JIT через TrollStore. Краткое подключение отладчика даёт Husk право выполнять сгенерированный код.";
+          +
+          +"The app crashed" = "Приложение завершилось с ошибкой";
+          +"Its code stopped with %@" = "Ошибка выполнения: %@";
+          diff --git a/src/java-framework/src/android/graphics/Bitmap.java b/src/java-framework/src/android/graphics/Bitmap.java
+          index 2036fee..00df052 100644
+          --- a/src/java-framework/src/android/graphics/Bitmap.java
+          +++ b/src/java-framework/src/android/graphics/Bitmap.java
+          @@ -18,12 +18,13 @@ public final class Bitmap implements android.os.Parcelable {
+           
+               private long mNative;
+               private int mWidth, mHeight;
+          +    private int mAllocationBytes;
+               private Config mConfig;
+               private boolean mMutable, mRecycled, mHasAlpha = true, mPremultiplied = true;
+               private int mDensity = android.util.DisplayMetrics.DENSITY_DEVICE_STABLE;
+               private int mGeneration;
+           
+          -    Bitmap(long nat, int w, int h, Config c, boolean mutable) { mNative = nat; mWidth = w; mHeight = h; mConfig = c == null ? Config.ARGB_8888 : c; mMutable = mutable; }
+          +    Bitmap(long nat, int w, int h, Config c, boolean mutable) { mNative = nat; mWidth = w; mHeight = h; mAllocationBytes = w * h * 4; mConfig = c == null ? Config.ARGB_8888 : c; mMutable = mutable; }
+               /** The native bitmap. */
+               public long huskNative() { return mNative; }
+               /** Changes each time it is drawn into, for caches. */
+          @@ -107,12 +108,24 @@ public final class Bitmap implements android.os.Parcelable {
+               private int huskBpp() { Config c = getConfig(); return c == Config.ALPHA_8 ? 1 : c == Config.RGB_565 || c == Config.ARGB_4444 ? 2 : c == Config.RGBA_F16 ? 8 : 4; }
+               public final int getRowBytes() { return mWidth * huskBpp(); }
+               public final int getByteCount() { return mWidth * mHeight * huskBpp(); }
+          -    public final int getAllocationByteCount() { return getByteCount(); }
+          +    public final int getAllocationByteCount() { return mAllocationBytes; }
+               public ColorSpace getColorSpace() { return ColorSpace.get(ColorSpace.Named.SRGB); }
+               public void setConfig(Config c) { mConfig = c; }
+          -    public void reconfigure(int w, int h, Config c) {}
+          -    public void setWidth(int w) {}
+          -    public void setHeight(int h) {}
+          +    public void reconfigure(int w, int h, Config c) {
+          +        if (mRecycled || !mMutable) throw new IllegalStateException("Bitmap must be mutable and not recycled");
+          +        if (w <= 0 || h <= 0 || (long) w * h * 4 > mAllocationBytes || c == Config.HARDWARE)
+          +            throw new IllegalArgumentException("Bitmap allocation is too small or config is unsupported");
+          +        if (!husk.Gfx.bmReconfigure(mNative, w, h)) throw new IllegalArgumentException("Cannot reconfigure bitmap");
+          +        mWidth = w; mHeight = h; mConfig = c == null ? Config.ARGB_8888 : c; mGeneration++;
+          +    }
+          +    public void setWidth(int w) { reconfigure(w, mHeight, mConfig); }
+          +    public void setHeight(int h) { reconfigure(mWidth, h, mConfig); }
+          +    void huskReuse(Bitmap decoded) {
+          +        reconfigure(decoded.mWidth, decoded.mHeight, decoded.mConfig);
+          +        husk.Gfx.bmAssign(mNative, decoded.mNative);
+          +        mDensity = decoded.mDensity; mHasAlpha = decoded.mHasAlpha;
+          +        mPremultiplied = decoded.mPremultiplied;
+          +    }
+               public void prepareToDraw() {}
+               public boolean sameAs(Bitmap o) { if (o == null || o.mWidth != mWidth || o.mHeight != mHeight) return false; int[] a = new int[mWidth * mHeight], b = new int[a.length]; getPixels(a, 0, mWidth, 0, 0, mWidth, mHeight); o.getPixels(b, 0, mWidth, 0, 0, mWidth, mHeight); return java.util.Arrays.equals(a, b); }
+           
+          diff --git a/src/java-framework/src/android/graphics/BitmapFactory.java b/src/java-framework/src/android/graphics/BitmapFactory.java
+          index 3b9a794..b0ce4c9 100644
+          --- a/src/java-framework/src/android/graphics/BitmapFactory.java
+          +++ b/src/java-framework/src/android/graphics/BitmapFactory.java
+          @@ -49,6 +49,13 @@ public class BitmapFactory {
+                           o.outWidth = b.getWidth(); o.outHeight = b.getHeight();
+                       }
+                   }
+          +        // Fresco requires decode(..., inBitmap) to return that exact object.
+          +        // Ignoring it causes rejected images and breaks the bitmap pool's accounting.
+          +        if (o != null && o.inBitmap != null) {
+          +            Bitmap reused = o.inBitmap;
+          +            try { reused.huskReuse(b); } finally { b.recycle(); }
+          +            return reused;
+          +        }
+                   return b;
+               }
+               public static Bitmap decodeByteArray(byte[] data, int offset, int length) { return decodeByteArray(data, offset, length, null); }
+          diff --git a/src/java-framework/src/husk/Gfx.java b/src/java-framework/src/husk/Gfx.java
+          index 00670fd..107015e 100644
+          --- a/src/java-framework/src/husk/Gfx.java
+          +++ b/src/java-framework/src/husk/Gfx.java
+          @@ -5,6 +5,8 @@ public final class Gfx {
+               private Gfx() {}
+               public static native long bmNew(int w, int h);
+               public static native void bmFree(long bm);
+          +    public static native boolean bmReconfigure(long bm, int w, int h);
+          +    public static native void bmAssign(long target, long source);
+               public static native void bmErase(long bm, int argb);
+               public static native int bmGetPixel(long bm, int x, int y);
+               public static native void bmSetPixel(long bm, int x, int y, int argb);
+          diff --git a/src/translation-layer-next/husk-tl-dvm-graphics.c b/src/translation-layer-next/husk-tl-dvm-graphics.c
+          index 8acfda2..831778e 100644
+          --- a/src/translation-layer-next/husk-tl-dvm-graphics.c
+          +++ b/src/translation-layer-next/husk-tl-dvm-graphics.c
+          @@ -49,6 +49,7 @@ static const int32_t *paint_of(jobj *a)
+           typedef struct gbitmap {
+               int w, h;
+               size_t stride;
+          +    size_t capacity;
+               uint8_t *px;
+               CGContextRef ctx;               /* drawn into by a Canvas; also how its pixels become a CGImage */
+           } gbitmap;
+          @@ -65,7 +66,8 @@ static gbitmap *bm_new(int w, int h)
+               if (w <= 0 || h <= 0 || (int64_t)w * h > (1ll << 28)) return NULL;
+               gbitmap *b = calloc(1, sizeof(*b));
+               b->w = w; b->h = h; b->stride = (size_t)w * 4;
+          -    b->px = calloc((size_t)h, b->stride);
+          +    b->capacity = (size_t)h * b->stride;
+          +    b->px = calloc(1, b->capacity);
+               if (!b->px) { free(b); return NULL; }
+               b->ctx = CGBitmapContextCreate(b->px, (size_t)w, (size_t)h, 8, b->stride, rgb(), kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+               if (!b->ctx) { free(b->px); free(b); return NULL; }
+          @@ -761,6 +763,29 @@ static uint32_t arr_len(jobj *x) { return x && x->kind == TL_K_PRIM_ARRAY ? x->a
+           /* ---- Bitmap */
+           NAT(G_bmNew) { (void)self; *ret = J((int64_t)(uintptr_t)bm_new(a[0].i, a[1].i)); return true; }
+           NAT(G_bmFree) { (void)self; (void)ret; bm_free(H(gbitmap, 0)); return true; }
+          +NAT(G_bmReconfigure)
+          +{
+          +    (void)self;
+          +    gbitmap *b = H(gbitmap, 0);
+          +    int w = a[1].i, h = a[2].i;
+          +    *ret = (jvalue){ .z = false };
+          +    if (!b || w <= 0 || h <= 0 || (uint64_t)w * h * 4 > b->capacity) return true;
+          +    CGContextRef ctx = CGBitmapContextCreate(b->px, w, h, 8, (size_t)w * 4,
+          +        rgb(), kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+          +    if (!ctx) return true;
+          +    CGContextRelease(b->ctx);
+          +    b->ctx = ctx; b->w = w; b->h = h; b->stride = (size_t)w * 4;
+          +    *ret = (jvalue){ .z = true };
+          +    return true;
+          +}
+          +NAT(G_bmAssign)
+          +{
+          +    (void)self; (void)ret;
+          +    gbitmap *dst = H(gbitmap, 0), *src = H(gbitmap, 1);
+          +    if (dst && src && dst->w == src->w && dst->h == src->h)
+          +        memcpy(dst->px, src->px, src->stride * src->h);
+          +    return true;
+          +}
+           NAT(G_bmErase)
+           {
+               (void)self; (void)ret;
+          @@ -1477,6 +1502,8 @@ bool tl_ui_has_frame(void) { return atomic_load(&S.any); }
+           static const struct { const char *name, *sig; dvm_native_fn fn; } k_gfx[] = {
+               { "bmNew", "(II)J", G_bmNew },
+               { "bmFree", "(J)V", G_bmFree },
+          +    { "bmReconfigure", "(JII)Z", G_bmReconfigure },
+          +    { "bmAssign", "(JJ)V", G_bmAssign },
+               { "bmErase", "(JI)V", G_bmErase },
+               { "bmGetPixel", "(JII)I", G_bmGetPixel },
+               { "bmSetPixel", "(JIII)V", G_bmSetPixel },
+          PATCH
+          git -C husk apply ../refresh.patch
+      - name: Install build tools
+        run: |
+          brew install meson ninja pkg-config xcodegen qemu e2fsprogs
+          python3 -m venv /tmp/husk-build-python
+          /tmp/husk-build-python/bin/python -m pip install 'PyYAML==6.0.3' 'Mako==1.3.10'
+          echo /tmp/husk-build-python/bin >> "$GITHUB_PATH"
+          rustup target add aarch64-apple-ios
+          xcodebuild -downloadComponent MetalToolchain
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Restore dependency build cache
+        uses: actions/cache/restore@v4
+        with:
+          key: husk-refresh-d92d0a1-${{ runner.arch }}-${{ github.run_id }}
+          restore-keys: husk-refresh-d92d0a1-${{ runner.arch }}-
+          path: |
+            husk/build/ios-arm64
+            husk/build/stamps
+            husk/third_party
+            husk/guests
+            husk/src/rppairing-ios/target
+      - name: Restore Android source resources
+        uses: actions/cache@v4
+        with:
+          key: husk-android-resources-v1-a8dbaecc8f
+          path: |
+            husk/build/android-source
+            husk/build/r8-8.5.35.jar
+      - name: Compile dependencies and package IPA
+        working-directory: husk
+        run: |
+          set -o pipefail
+          HUSK_JDK="$JAVA_HOME" python3 scripts/prepare_android_runtime.py
+          mkdir -p build/logs
+          if ! ./scripts/ci_build.sh "$PWD/build/Husk-iOS15.ipa" 2>&1 | tee build/logs/ci.log; then
+            for log in build/logs/*.log /tmp/husk_ios15/build.log; do
+              [ -f "$log" ] || continue
+              echo "::group::$log"
+              tail -n 80 "$log"
+              echo "::endgroup::"
+            done
+            exit 1
+          fi
+          shasum -a 256 build/*.ipa build/*.tipa > build/SHA256SUMS.txt
+      - name: Preserve packages and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Husk-iOS15-refresh-${{ github.run_number }}
+          if-no-files-found: warn
+          path: |
+            husk/build/*.ipa
+            husk/build/*.tipa
+            husk/build/SHA256SUMS.txt
+            husk/build/logs/
+            /tmp/husk_ios15/build.log
+            refresh.patch
+      - name: Save dependency progress for the next build
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          key: husk-refresh-d92d0a1-${{ runner.arch }}-${{ github.run_id }}
+          path: |
+            husk/build/ios-arm64
+            husk/build/stamps
+            husk/third_party
+            husk/guests
+            husk/src/rppairing-ios/target

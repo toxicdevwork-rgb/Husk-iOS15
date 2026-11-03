@@ -90,6 +90,42 @@ jobs:
           +    problems = audit(Path(sys.argv[1]))
           +    print('\n'.join(problems) if problems else 'Android runtime resources: OK')
           +    sys.exit(bool(problems))
+          diff --git a/scripts/build_gpu_ios.sh b/scripts/build_gpu_ios.sh
+          index f8d2c65..bf67e6e 100755
+          --- a/scripts/build_gpu_ios.sh
+          +++ b/scripts/build_gpu_ios.sh
+          @@ -18,8 +18,8 @@ HUSK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+           GPU="$HUSK_ROOT/third_party/gpu"
+           PREFIX="$HUSK_ROOT/build/ios-arm64/sysroot"
+           LOGS="$HUSK_ROOT/build/logs"
+          -MESON=/opt/homebrew/bin/meson
+          -NINJA=/opt/homebrew/bin/ninja
+          +MESON="$(command -v meson)"
+          +NINJA="$(command -v ninja)"
+           mkdir -p "$GPU" "$LOGS"
+           
+           EPOXY_COMMIT=bf98587477fe68d07b93319ece7b40a7d0e2eabe
+          diff --git a/scripts/package_ipa.sh b/scripts/package_ipa.sh
+          index da8e595..eba8e6a 100755
+          --- a/scripts/package_ipa.sh
+          +++ b/scripts/package_ipa.sh
+          @@ -102,11 +102,16 @@ if [ -f "$APP_PLIST" ]; then
+               COMMIT="$(git -C "$HUSK_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+               git -C "$HUSK_ROOT" diff --quiet 2>/dev/null || COMMIT="$COMMIT-dirty"
+               plutil -replace HuskBuildCommit -string "$COMMIT" "$APP_PLIST"
+          +    if [ -n "${GITHUB_SHA:-}" ]; then
+          +        plutil -replace HuskPortCommit -string "$GITHUB_SHA" "$APP_PLIST"
+          +        plutil -replace HuskBuildRun -string "${GITHUB_RUN_ID:-}" "$APP_PLIST"
+          +    fi
+               plutil -replace HuskBuildDate -string "$(date -u '+%Y-%m-%d %H:%M UTC')" "$APP_PLIST"
+               echo "==> stamped build $COMMIT"
+           fi
+           
+           echo "==> validating bundle"
+          +python3 "$HUSK_ROOT/scripts/audit_runtime_resources.py" "$APP"
+           PLIST="$APP/Info.plist"
+           rc=0
+           for key in CFBundleIdentifier CFBundleExecutable CFBundleName \
           diff --git a/scripts/prepare_android_runtime.py b/scripts/prepare_android_runtime.py
           new file mode 100644
           index 0000000..6697c60
@@ -274,6 +310,80 @@ jobs:
           +
           +if __name__ == '__main__':
           +    main()
+          diff --git a/scripts/verify_ios15_packages.py b/scripts/verify_ios15_packages.py
+          new file mode 100644
+          index 0000000..eab6fc6
+          --- /dev/null
+          +++ b/scripts/verify_ios15_packages.py
+          @@ -0,0 +1,53 @@
+          +#!/usr/bin/env python3
+          +"""Check the actual archives, their runtime resources and signed bundle identity."""
+          +import hashlib
+          +import os
+          +from pathlib import Path
+          +import plistlib
+          +import subprocess
+          +import tempfile
+          +import zipfile
+          +
+          +from audit_runtime_resources import audit
+          +
+          +
+          +def verify(package):
+          +    with tempfile.TemporaryDirectory(prefix='husk-package-') as directory:
+          +        with zipfile.ZipFile(package) as archive:
+          +            if archive.testzip() is not None:
+          +                raise ValueError(f'{package}: corrupt ZIP')
+          +        # ditto preserves framework symlinks and executable permissions on macOS.
+          +        subprocess.run(['ditto', '-x', '-k', str(package), directory], check=True)
+          +        apps = list((Path(directory)/'Payload').glob('*.app'))
+          +        if len(apps) != 1:
+          +            raise ValueError('Expected exactly one app in Payload')
+          +        app = apps[0]
+          +        info = plistlib.loads((app/'Info.plist').read_bytes())
+          +        version = tuple(map(int, info['MinimumOSVersion'].split('.')))
+          +        if version > (15, 6, 1) or info['CFBundleIdentifier'] != 'com.husk.app':
+          +            raise ValueError(f'Wrong app identity or minimum OS: {info}')
+          +        if info.get('HuskPortCommit') != os.environ['GITHUB_SHA']:
+          +            raise ValueError('Package does not identify the current port commit')
+          +        expected = Path(os.environ['DD'])/'Build/Products/Release-iphoneos/Husk.app'/info['CFBundleExecutable']
+          +        # codesign changes the executable. Compare the UUID of the compiled code.
+          +        def uuid(path):
+          +            return subprocess.check_output(['dwarfdump', '--uuid', str(path)], text=True).split()[1]
+          +        if uuid(app/info['CFBundleExecutable']) != uuid(expected):
+          +            raise ValueError('Packaged executable differs from this build')
+          +        dex = Path('build/java-runtime/husk-framework.dex').read_bytes()
+          +        if (app/'java-runtime/husk-framework.dex').read_bytes() != dex:
+          +            raise ValueError('Packaged Java framework differs from this build')
+          +        errors = audit(app)
+          +        if errors:
+          +            raise ValueError('\n'.join(errors))
+          +        russian = subprocess.check_output(['plutil', '-convert', 'xml1', '-o', '-', str(app/'ru.lproj/Localizable.strings')])
+          +        if plistlib.loads(russian).get('Home') != 'Главная':
+          +            raise ValueError('Russian localization is absent')
+          +        subprocess.run(['codesign', '--verify', '--deep', '--strict', str(app)], check=True)
+          +        print(f'PASS {package.name}: {package.stat().st_size} bytes, iOS {info["MinimumOSVersion"]}, port {info["HuskPortCommit"]}', flush=True)
+          +        print('SHA256', hashlib.sha256(package.read_bytes()).hexdigest(), flush=True)
+          +
+          +
+          +if __name__ == '__main__':
+          +    for extension in ('ipa', 'tipa'):
+          +        verify(Path(f'build/Husk-iOS15.{extension}'))
+          diff --git a/src/app/Husk/ProfileView.swift b/src/app/Husk/ProfileView.swift
+          index 3fcb4c3..9e36a98 100644
+          --- a/src/app/Husk/ProfileView.swift
+          +++ b/src/app/Husk/ProfileView.swift
+          @@ -19,8 +19,8 @@ struct ProfileView: View {
+                       .background(Console.page.ignoresSafeArea())
+                       .toolbar {
+                           ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
+          -                if account.signedIn {
+          -                    ToolbarItem(placement: .primaryAction) {
+          +                ToolbarItem(placement: .primaryAction) {
+          +                    if account.signedIn {
+                                   Menu {
+                                       Button { editing = true } label: { Label("Edit Profile", systemImage: "pencil") }
+                                       if let u = account.user {
           diff --git a/src/app/Husk/ru.lproj/Localizable.strings b/src/app/Husk/ru.lproj/Localizable.strings
           new file mode 100644
           index 0000000..6e0d9a3
@@ -721,6 +831,38 @@ jobs:
                public static native void bmErase(long bm, int argb);
                public static native int bmGetPixel(long bm, int x, int y);
                public static native void bmSetPixel(long bm, int x, int y, int argb);
+          diff --git a/src/translation-layer-next/husk-tl-bionic-io.c b/src/translation-layer-next/husk-tl-bionic-io.c
+          index e400721..745e04d 100644
+          --- a/src/translation-layer-next/husk-tl-bionic-io.c
+          +++ b/src/translation-layer-next/husk-tl-bionic-io.c
+          @@ -46,7 +46,7 @@ bool tl_ld_covers(const void *addr, size_t bytes);
+           #include <sys/time.h>
+           #include <sys/uio.h>
+           #include <mach/mach.h>
+          -#include <mach/mach_vm.h>
+          +#include <mach/vm_map.h> /* The iOS SDK does not provide mach_vm.h. */
+           #include <time.h>
+           #include <search.h>
+           #include <dlfcn.h>
+          @@ -1444,10 +1444,15 @@ const char *tl_ld_symbol_at(const void *addr, const char **lib_name, const void
+           /* Whether all of [a, a+l) can be written now (vm_region), so a scan that rewrites words in it does not fault. */
+           static bool b_mprotect_writable(void *a, size_t l)
+           {
+          -    mach_vm_address_t at = (mach_vm_address_t)(uintptr_t)a; mach_vm_size_t sz = 0;
+          +    vm_address_t start = (vm_address_t)(uintptr_t)a, at = start;
+          +    vm_size_t sz = 0;
+               vm_region_basic_info_data_64_t info; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
+          -    if (mach_vm_region(mach_task_self(), &at, &sz, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, &obj) != KERN_SUCCESS) return false;
+          -    return at <= (mach_vm_address_t)(uintptr_t)a && at + sz >= (mach_vm_address_t)(uintptr_t)a + l && (info.protection & VM_PROT_WRITE);
+          +    kern_return_t kr = vm_region_64(mach_task_self(), &at, &sz, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, &obj);
+          +    if (obj != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), obj);
+          +    if (kr != KERN_SUCCESS) return false;
+          +    /* vm_region_64 may return the next region after a hole. Subtract only after
+          +     * checking its start, and avoid overflowing either end of the range. */
+          +    return at <= start && start - at <= sz && l <= sz - (start - at) && (info.protection & VM_PROT_WRITE);
+           }
+           static int b_mprotect(void *a, size_t l, int prot)
+           {
           diff --git a/src/translation-layer-next/husk-tl-dvm-graphics.c b/src/translation-layer-next/husk-tl-dvm-graphics.c
           index 8acfda2..831778e 100644
           --- a/src/translation-layer-next/husk-tl-dvm-graphics.c
@@ -782,36 +924,6 @@ jobs:
                { "bmErase", "(JI)V", G_bmErase },
                { "bmGetPixel", "(JII)I", G_bmGetPixel },
                { "bmSetPixel", "(JIII)V", G_bmSetPixel },
-          diff --git a/scripts/build_gpu_ios.sh b/scripts/build_gpu_ios.sh
-          index f8d2c65..bf67e6e 100755
-          --- a/scripts/build_gpu_ios.sh
-          +++ b/scripts/build_gpu_ios.sh
-          @@ -18,8 +18,8 @@ HUSK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-           GPU="$HUSK_ROOT/third_party/gpu"
-           PREFIX="$HUSK_ROOT/build/ios-arm64/sysroot"
-           LOGS="$HUSK_ROOT/build/logs"
-          -MESON=/opt/homebrew/bin/meson
-          -NINJA=/opt/homebrew/bin/ninja
-          +MESON="$(command -v meson)"
-          +NINJA="$(command -v ninja)"
-           mkdir -p "$GPU" "$LOGS"
-           
-           EPOXY_COMMIT=bf98587477fe68d07b93319ece7b40a7d0e2eabe
-          diff --git a/src/app/Husk/ProfileView.swift b/src/app/Husk/ProfileView.swift
-          index 3fcb4c3..9e36a98 100644
-          --- a/src/app/Husk/ProfileView.swift
-          +++ b/src/app/Husk/ProfileView.swift
-          @@ -19,8 +19,8 @@ struct ProfileView: View {
-                       .background(Console.page.ignoresSafeArea())
-                       .toolbar {
-                           ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
-          -                if account.signedIn {
-          -                    ToolbarItem(placement: .primaryAction) {
-          +                ToolbarItem(placement: .primaryAction) {
-          +                    if account.signedIn {
-                                   Menu {
-                                       Button { editing = true } label: { Label("Edit Profile", systemImage: "pencil") }
-                                       if let u = account.user {
           PATCH
           git -C husk apply ../refresh.patch
       - name: Install build tools
@@ -861,6 +973,7 @@ jobs:
             done
             exit 1
           fi
+          python3 scripts/verify_ios15_packages.py | tee build/logs/package-verification.log
           shasum -a 256 build/*.ipa build/*.tipa > build/SHA256SUMS.txt
       - name: Preserve packages and diagnostics
         if: always()

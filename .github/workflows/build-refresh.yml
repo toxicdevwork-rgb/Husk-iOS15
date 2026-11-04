@@ -106,7 +106,7 @@ jobs:
            
            EPOXY_COMMIT=bf98587477fe68d07b93319ece7b40a7d0e2eabe
           diff --git a/scripts/package_ipa.sh b/scripts/package_ipa.sh
-          index da8e595..eba8e6a 100755
+          index da8e595..df2531b 100755
           --- a/scripts/package_ipa.sh
           +++ b/scripts/package_ipa.sh
           @@ -102,11 +102,16 @@ if [ -f "$APP_PLIST" ]; then
@@ -126,6 +126,15 @@ jobs:
            PLIST="$APP/Info.plist"
            rc=0
            for key in CFBundleIdentifier CFBundleExecutable CFBundleName \
+          @@ -137,7 +142,7 @@ fi
+           # @rpath/libANGLE-shared.dylib". Everything else in this validation passed. A
+           # check that covers one of two required libraries is a check that reports
+           # success on a bundle that cannot launch.
+          -for lib in libqemu-aarch64-softmmu.dylib libANGLE-shared.dylib libhuskps4.dylib; do
+          +for lib in libqemu-aarch64-softmmu.dylib libANGLE-shared.dylib; do
+               if [ ! -f "$APP/Frameworks/$lib" ]; then
+                   echo "  MISSING  Frameworks/$lib" >&2
+                   rc=1
           diff --git a/scripts/prepare_android_runtime.py b/scripts/prepare_android_runtime.py
           new file mode 100644
           index 0000000..6697c60
@@ -752,6 +761,24 @@ jobs:
           +
           +"The app crashed" = "Приложение завершилось с ошибкой";
           +"Its code stopped with %@" = "Ошибка выполнения: %@";
+          diff --git a/src/app/project.yml b/src/app/project.yml
+          index b3e8888..0553cfe 100644
+          --- a/src/app/project.yml
+          +++ b/src/app/project.yml
+          @@ -150,13 +150,6 @@ targets:
+                   embed: true
+                   codeSign: true
+                   link: false
+          -      # The PS4 layer: Bachata-S4's core (branch husk) on husk-fex's FEXCore, as one dylib exporting husk_console_module_v1.
+          -      # Built by scripts/build_ps4_ios.sh. Embedded, not linked: it needs iOS 17.4 and is opened by path only there
+          -      # (PS4Store.moduleURL), by the console host (src/translation-layer-next/husk-console-host.c).
+          -      - framework: ../../build/ios-arm64/lib/libhuskps4.dylib
+          -        embed: true
+          -        codeSign: true
+          -        link: false
+               preBuildScripts:
+                 - name: Stage guest image
+                   # The Phase 0 guest is far too large for git, so it is fetched rather than
           diff --git a/src/java-framework/src/android/graphics/Bitmap.java b/src/java-framework/src/android/graphics/Bitmap.java
           index 2036fee..00df052 100644
           --- a/src/java-framework/src/android/graphics/Bitmap.java
